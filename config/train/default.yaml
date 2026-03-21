@@ -1,7 +1,7 @@
-epochs: 5
+epochs: 100
 learning_rate: 0.001
 weight_decay: 0.0001
-batch_size: 2 # 32
+batch_size: 32
 
 tensorboard_dir: "runs/experiment_1"
 checkpoint_dir: "checkpoints/experiment_1"

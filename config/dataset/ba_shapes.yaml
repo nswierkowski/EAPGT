@@ -1,7 +1,7 @@
 dataset:
   name: ba_shapes
   root_dir: ./data/ba_shapes
-  num_samples: 1000
+  num_samples: 100000
   transform: combined  
 
 generation:
@@ -22,7 +22,7 @@ transform_params:
   pe_dim: 16
 
 splits:
-  train: 0.60
+  train: 0.70
   val: 0.10
   test: 0.10
-  eap: 0.20
+  eap: 0.10

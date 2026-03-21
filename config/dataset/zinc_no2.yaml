@@ -9,7 +9,7 @@ dataset:
     smarts_patterns: 
       - "[N+](=O)[O-]"  
       - "[NX3;H2]" 
-    max_molecules: 50000           
+    max_molecules: 250000           
 
   splits:
     train: 0.70
