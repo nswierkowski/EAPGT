@@ -1,0 +1,19 @@
+dataset:
+  name: ba_shapes #zinc_no2 ba_shapes
+  root_dir: ./data
+  
+model:
+  name: graphgps
+  pretrained_path: ./data/weights/148.ckpt
+
+  num_layers: 16      
+  hidden_dim: 256      
+  num_heads: 8         
+  dropout: 0.1        
+
+  num_classes: 2       
+  input_dim: 10        
+
+  pe_type: rwpe
+  pe_dim: 20           
+  walk_length: 16      

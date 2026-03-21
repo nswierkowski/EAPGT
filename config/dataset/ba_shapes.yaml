@@ -1,0 +1,28 @@
+dataset:
+  name: ba_shapes
+  root_dir: ./data/ba_shapes
+  num_samples: 1000
+  transform: combined  
+
+generation:
+  num_base_nodes: 300
+  num_houses: 80
+  m_edges: 1     
+  feature_dim: 10  
+
+transform_params:
+  # For Graphormer
+  max_nodes: 50
+  multi_hop_max_dist: 5
+  spatial_pos_max: 1024
+ 
+  # For GraphGPS
+  pe_type: rwpe
+  walk_length: 20
+  pe_dim: 16
+
+splits:
+  train: 0.60
+  val: 0.10
+  test: 0.10
+  eap: 0.20
