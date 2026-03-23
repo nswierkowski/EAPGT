@@ -1,6 +1,9 @@
+import os
+import random
 import argparse
 import yaml
 import torch
+import numpy as np
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 
@@ -13,6 +16,16 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as file:
         return yaml.safe_load(file)
 
+def set_seed(seed: int):
+    """Ensures completely reproducible training runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True, help="Path to dataset config")
@@ -23,6 +36,10 @@ def main():
     dataset_config = load_config(args.dataset)
     model_config = load_config(args.model)
     train_config = load_config(args.train)
+
+    seed = train_config.get('seed', 42)
+    set_seed(seed)
+    print(f"Random state initialized with seed: {seed}")
 
     config = {}
     config.update(dataset_config)
@@ -35,13 +52,26 @@ def main():
     
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
     
     collator = GraphTransformerCollator(config)
     batch_size = train_config.get('batch_size', 32)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collator)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collator)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, 
+        collate_fn=collator, worker_init_fn=seed_worker
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False, 
+        collate_fn=collator, worker_init_fn=seed_worker
+    )
 
     model = get_model(config).to(device)
     

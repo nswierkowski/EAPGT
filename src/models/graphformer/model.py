@@ -4,10 +4,6 @@ from transformers import GraphormerForGraphClassification, GraphormerConfig
 from src.models.base import BaseGraphTransformer
 
 class ContinuousFeatureEncoder(nn.Module):
-    """
-    Wraps an nn.Linear layer to project continuous features, 
-    then unsqueezes a dimension to safely absorb Hugging Face's hardcoded .sum(dim=-2).
-    """
     def __init__(self, input_dim, hidden_size):
         super().__init__()
         self.proj = nn.Linear(input_dim, hidden_size)
@@ -22,14 +18,20 @@ class GraphormerModel(BaseGraphTransformer):
         
         model_config = config['model']
         dataset_config = config.get('dataset', {})
+        
         dataset_name = dataset_config.get('name', 'ba_shapes') 
         
         pretrained_path = model_config.get('pretrained_path', None)
         num_classes = model_config.get('num_classes', 2)
         input_dim = model_config.get('input_dim', 10)
         
+        hidden_size = model_config.get('hidden_dim', 768)
+        num_layers = model_config.get('num_layers', 12)
+        num_heads = model_config.get('num_heads', 32)
+        
         if pretrained_path:
             print(f"Loading pre-trained Graphormer strictly from: {pretrained_path}")
+            print("WARNING: Custom architecture sizes (hidden_dim, layers) are ignored when loading pre-trained weights.")
             hf_config = GraphormerConfig.from_pretrained(pretrained_path)
             self.hf_model = GraphormerForGraphClassification.from_pretrained(
                 pretrained_path, config=hf_config
@@ -43,15 +45,19 @@ class GraphormerModel(BaseGraphTransformer):
                 else:
                     self.hf_model.classifier = nn.Linear(self.hf_model.config.hidden_size, num_classes)
         else:
-            print("Initializing untrained Graphormer from scratch.")
-            hf_config = GraphormerConfig(num_labels=num_classes)
+            print(f"Initializing untrained Graphormer from scratch (Layers: {num_layers}, Dim: {hidden_size}, Heads: {num_heads}).")
+            hf_config = GraphormerConfig(
+                num_labels=num_classes,
+                hidden_size=hidden_size,
+                num_hidden_layers=num_layers,
+                num_attention_heads=num_heads
+            )
             self.hf_model = GraphormerForGraphClassification(hf_config)
-            
 
         if dataset_name == 'ba_shapes':
             print("Detected BA-Shapes: Applying ContinuousFeatureEncoder patch.")
-            hidden_size = self.hf_model.config.hidden_size
-            self.hf_model.encoder.graph_encoder.graph_node_feature.atom_encoder = ContinuousFeatureEncoder(input_dim, hidden_size)
+            actual_hidden_size = self.hf_model.config.hidden_size
+            self.hf_model.encoder.graph_encoder.graph_node_feature.atom_encoder = ContinuousFeatureEncoder(input_dim, actual_hidden_size)
         else:
             print(f"Detected {dataset_name}: Keeping Hugging Face's discrete atom encoder for chemistry.")
             
@@ -90,12 +96,7 @@ class GraphormerModel(BaseGraphTransformer):
         return outputs.logits
         
     def get_patchable_components(self):
-        """
-        Digs into the Hugging Face architecture and exposes the exact 
-        attention heads so your EAP algorithm can patch them.
-        """
         layers = self.hf_model.encoder.graph_encoder.layers
-        
         return {
             "self_attentions": [layer.self_attn for layer in layers],
             "mlps": [layer.fc1 for layer in layers]

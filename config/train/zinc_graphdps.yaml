@@ -1,0 +1,10 @@
+epochs: 200
+learning_rate: 0.0001
+weight_decay: 0.0001
+batch_size: 32
+seed: 42
+
+tensorboard_dir: "runs/zinc_graphdps"
+checkpoint_dir: "checkpoints/zinc_graphdps"
+save_every_n_epochs: 10
+resume_from_checkpoint: null  

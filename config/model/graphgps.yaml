@@ -1,6 +1,6 @@
-dataset:
-  name: ba_shapes #zinc_no2 ba_shapes
-  root_dir: ./data
+# dataset:
+#   name: ba_shapes #zinc_no2 ba_shapes
+#   root_dir: ./data
   
 model:
   name: graphgps
