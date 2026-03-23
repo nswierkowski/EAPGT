@@ -1,6 +1,6 @@
 # EAP-GT
 
-EAP-GT implements Energy-based Attention Pruning (EAP) for graph transformers, with a focus on GraphDPS and Graphformer architectures.
+EAP-GT implements Edge Attribution Patching (EAP) for graph transformers, with a focus on GraphDPS and Graphformer architectures.
 
 ## About
 
