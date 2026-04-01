@@ -18,3 +18,9 @@ train_zinc_graphdps:
 
 train__zinc_graphformer:
 	PYTHONPATH=. python3 script/run_training.py --dataset config/dataset/zinc_no2.yaml --model config/model/graphformer.yaml --train config/train/zinc_graphformer.yaml
+
+create_counterfactual_zinc:
+	PYTHONPATH=. python3 script/create_counterfactual_dataset.py --config config/dataset/zinc_no2.yaml
+
+create_counterfactual_ba_shape:
+	PYTHONPATH=. python3 script/create_counterfactual_dataset.py --config config/dataset/ba_shapes.yaml

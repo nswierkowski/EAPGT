@@ -27,7 +27,9 @@ class ZINCNO2Dataset(InMemoryDataset):
         return len(self.graphs)
 
     def get(self, idx):
-        return self.graphs[idx]
+        data = self.graphs[idx]
+        data.smiles = self.smiles_list[idx]
+        return data
 
     @property
     def raw_file_names(self):

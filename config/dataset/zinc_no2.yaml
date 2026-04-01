@@ -5,14 +5,14 @@ dataset:
   transform: graphormer
 
 
-  generation:
-    smarts_patterns: 
-      - "[N+](=O)[O-]"  
-      - "[NX3;H2]" 
-    max_molecules: 250000           
+generation:
+  smarts_patterns: 
+    - "[N+](=O)[O-]"  
+    - "[NX3;H2]" 
+  max_molecules: 250000           
 
-  splits:
-    train: 0.70
-    val: 0.10
-    test: 0.10
-    eap: 0.10
+splits:
+  train: 0.70
+  val: 0.10
+  test: 0.10
+  eap: 0.10
