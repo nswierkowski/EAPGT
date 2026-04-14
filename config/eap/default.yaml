@@ -1,0 +1,43 @@
+experiment:
+  random_state: 42
+  save_dir: "./outputs/eap_results/ba_shapes_classic/"
+
+# data:
+#   dataset_name: "ba_shapes" # or "zinc"
+#   data_path: "./data/zinc_processed.pt"
+#   counterfactual_path: "./data/zinc_counterfactuals.pt"
+#   batch_size: 32
+
+dataset:
+  name: ba_shapes
+  root_dir: ./data/ba_shapes
+  num_samples: 100000
+  counterfactual_path: "./data/zinc_counterfactuals.pt"
+  batch_size: 32
+  transform: combined  
+
+
+model:
+  architecture: "graphgps" # or "graphormer"
+  checkpoint_path: "./checkpoints/ba_shapes_graphdps/graphdps_epoch_50.pt"  
+  num_layers: 16      
+  hidden_dim: 256      
+  num_heads: 8         
+  dropout: 0.1        
+
+  num_classes: 2       
+  input_dim: 10        
+
+  pe_type: rwpe
+  pe_dim: 20           
+  walk_length: 16 
+
+eap:
+  strategy: "classic" # "classic", "minar", "hybrid"
+  
+optimizer:
+  mode: "sweep" # or "sweep"
+  metric: "f1"
+  max_degradation: 0.05 # Allow max 5% drop in F1 score
+  tolerance: 0.005 # Binary search precision
+  sweep_percentiles: [0.01, 0.05, 0.1, 0.2, 0.5] # Used if mode is 'sweep'
