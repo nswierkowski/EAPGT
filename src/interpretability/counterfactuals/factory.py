@@ -38,7 +38,7 @@ def get_counterfactual_dataset(config, base_dataset=None):
     transform = get_transform(config)
     
     counterfactuals = []
-    
+    print(f"LEN OF base_dataset: {len(base_dataset)}")
     for i in tqdm(range(len(base_dataset)), desc="Generating Pairs"):
         clean_data = base_dataset[i]
         

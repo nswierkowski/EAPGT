@@ -14,5 +14,5 @@ generation:
 splits:
   train: 0.70
   val: 0.10
-  test: 0.10
-  eap: 0.10
+  test: 0.20
+  eap: 0.0

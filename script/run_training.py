@@ -50,11 +50,23 @@ def main():
     
     full_dataset = get_dataset(config)
     
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
+    if hasattr(full_dataset[0], 'split_mask'):
+        print("Detected predefined stratified split masks. Applying them...")
+        train_dataset = [d for d in full_dataset if d.split_mask.item() == 0]
+        val_dataset = [d for d in full_dataset if d.split_mask.item() == 1]
+        test_dataset = [d for d in full_dataset if d.split_mask.item() == 2]
+    else:
+        print("No split_mask detected. Falling back to random_split (80/10/10)...")
+        train_size = int(0.8 * len(full_dataset))
+        val_size = int(0.1 * len(full_dataset))
+        test_size = len(full_dataset) - train_size - val_size
+        
+        generator = torch.Generator().manual_seed(seed)
+        train_dataset, val_dataset, test_dataset = random_split(
+            full_dataset, [train_size, val_size, test_size], generator=generator
+        )
     
-    generator = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+    print(f"Splits -> Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
     
     collator = GraphTransformerCollator(config)
     batch_size = train_config.get('batch_size', 32)
@@ -73,6 +85,11 @@ def main():
         collate_fn=collator, worker_init_fn=seed_worker
     )
 
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, 
+        collate_fn=collator, worker_init_fn=seed_worker
+    )
+
     model = get_model(config).to(device)
     
     lr = train_config.get('learning_rate', 1e-3)
@@ -83,12 +100,14 @@ def main():
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
+        test_loader=test_loader,
         optimizer=optimizer,
         device=device,
         config=train_config
     )
     
-    trainer.fit()
+    trainer.fit()    
+    trainer.test()
 
 if __name__ == "__main__":
     main()

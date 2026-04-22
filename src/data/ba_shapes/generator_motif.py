@@ -18,13 +18,6 @@ class HouseMotif(MotifGenerator):
         house = nx.Graph()
         
         # Add edges for the house (0 is top, 1 & 2 are middle, 3 & 4 are bottom)
-        #                 0
-        #                / \
-        #               /   \
-        #              1-----2
-        #              |     |
-        #              |     |
-        #              3-----4
         edges = [(0, 1), (0, 2), (1, 2), (1, 3), (2, 4), (3, 4)]
         house.add_edges_from(edges)
         

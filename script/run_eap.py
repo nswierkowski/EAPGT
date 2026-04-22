@@ -7,13 +7,16 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import f1_score
 from torch_geometric.loader import DataLoader 
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from src.models.graphgps.model import GraphGPSModel 
 from src.models.graphformer.model import GraphormerModel
 from src.interpretability.eap.strategies import ClassicEAP, MinarEAP, HybridEAP
 from src.interpretability.eap.optimizer import ThresholdOptimizer
-
 from src.interpretability.counterfactuals.factory import get_counterfactual_dataset
+
+from src.data.collator import GraphTransformerCollator
 
 def set_seed(seed: int):
     """Ensures complete reproducibility."""
@@ -46,7 +49,8 @@ def compute_global_scores(engine, dataloader, loss_fn, device) -> dict:
     total_graphs = 0
     
     for batch in tqdm(dataloader, desc="EAP Scoring"):
-        clean_batch, corrupted_batch = batch['clean'].to(device), batch['corrupted'].to(device)
+        clean_batch = batch['clean'].to(device) if hasattr(batch['clean'], 'to') else batch['clean']
+        corrupted_batch = batch['corrupted'].to(device) if hasattr(batch['corrupted'], 'to') else batch['corrupted']
         
         batch_scores = engine.evaluate_pair(clean_batch, corrupted_batch, loss_fn)
         
@@ -65,28 +69,55 @@ def compute_global_scores(engine, dataloader, loss_fn, device) -> dict:
         
     return global_scores
 
+def get_cf_collate_fn(config):
+    base_collator = GraphTransformerCollator(config)
+    
+    def collate_fn(batch_list):
+        clean_list = [item['clean'] for item in batch_list]
+        corrupted_list = [item['corrupted'] for item in batch_list]
+        
+        return {
+            'clean': base_collator(clean_list),
+            'corrupted': base_collator(corrupted_list)
+        }
+    return collate_fn
+
 def create_patched_metric_fn(engine, device):
     """
-    Creates a metric function that is EAP-aware.
-    To patch, the engine needs A_corrupted in its cache before running the clean pass.
+    Creates a metric function that handles per-batch corrupted caching AND patching.
+    Takes 'masks' as an optional argument.
     """
-    def metric_fn(model, dataloader):
+    def metric_fn(model, dataloader, masks=None):
         model.eval()
         all_preds = []
         all_targets = []
         
         with torch.no_grad():
             for batch in dataloader:
-                clean_batch = batch['clean'].to(device)
-                corrupted_batch = batch['corrupted'].to(device)
+                clean_batch = batch['clean'].to(device) if hasattr(batch['clean'], 'to') else batch['clean']
+                corrupted_batch = batch['corrupted'].to(device) if hasattr(batch['corrupted'], 'to') else batch['corrupted']
                 
                 engine.register_corrupted_hooks()
                 model(corrupted_batch)
                 
-                preds = model(clean_batch).argmax(dim=-1)
+                if masks is not None:
+                    engine.register_patching_hooks(masks)
+                else:
+                    engine.remove_hooks() 
+                
+                # IMPERATIVE FIX: Align prediction and label extraction with your Trainer
+                outputs = model(clean_batch)
+                logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+                preds = logits.argmax(dim=-1)
+                
+                labels = clean_batch.y if hasattr(clean_batch, 'y') else clean_batch['labels']
+                if labels.dim() > 1 and labels.size(-1) == 1:
+                    labels = labels.squeeze(-1)
                 
                 all_preds.append(preds.cpu())
-                all_targets.append(clean_batch.y.cpu())
+                all_targets.append(labels.cpu())
+                
+        engine.remove_hooks()
                 
         preds = torch.cat(all_preds).numpy()
         targets = torch.cat(all_targets).numpy()
@@ -94,6 +125,39 @@ def create_patched_metric_fn(engine, device):
         
     return metric_fn
 
+def analyze_attribution_scores(global_scores, save_dir, strategy_name):
+    """Saves raw EAP scores and plots their distribution."""
+    print(f"Saving and analyzing {strategy_name.upper()} attribution scores...")
+
+    torch.save(global_scores, os.path.join(save_dir, 'global_attributions.pt'))
+
+    all_scores = []
+    for name, score_tensor in global_scores.items():
+        all_scores.append(score_tensor.detach().cpu().flatten().abs())
+        
+    if not all_scores:
+        print("Warning: No attribution scores found to plot.")
+        return
+
+    flat_scores = torch.cat(all_scores).numpy()
+
+    plt.figure(figsize=(10, 6))
+    
+    sns.histplot(flat_scores, bins=100, log_scale=(False, True), color='#9b59b6', 
+                     label=f"{strategy_name.capitalize()} Scores\nMax: {flat_scores.max():.4f}\nMean: {flat_scores.mean():.6f}")
+    plt.title(f"EAP Attribution Score Distribution ({strategy_name.capitalize()})", fontsize=14)
+    plt.xlabel("Absolute Attribution Score |Act_diff * Grad|")
+    plt.ylabel("Count (Log Scale)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+
+    plot_path = os.path.join(save_dir, 'attribution_distribution.png')
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
+    
+    print(f"Saved attribution data to {save_dir}/global_attributions.[pt|png]")
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to EAP YAML config")
@@ -107,22 +171,33 @@ def main():
     os.makedirs(config['experiment']['save_dir'], exist_ok=True)
     print(f"Loading {config['dataset']['name']} dataset and counterfactuals...")
     
-
     base_dataset = None 
     cf_data_list = get_counterfactual_dataset(config, base_dataset=base_dataset)
     
+    cf_collate_fn = get_cf_collate_fn(config)
     dataloader = DataLoader(
         cf_data_list, 
         batch_size=config['dataset']['batch_size'], 
-        shuffle=False 
+        shuffle=False,
+        collate_fn=cf_collate_fn
     )
 
     model = get_model(config).to(device)
-    loss_fn = nn.CrossEntropyLoss()
+    checkpoint_path = config['model'].get('checkpoint_path')
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded trained checkpoint from {checkpoint_path}")
+    else:
+        print("WARNING: No checkpoint found! Running on random weights.")
 
+    model.eval()
+    loss_fn = nn.CrossEntropyLoss()
     engine = get_eap_engine(config['eap']['strategy'], model, config)
 
     global_scores = compute_global_scores(engine, dataloader, loss_fn, device)
+
+    analyze_attribution_scores(global_scores, config['experiment']['save_dir'], config['eap']['strategy'])
 
     metric_fn = create_patched_metric_fn(engine, device)
     optimizer = ThresholdOptimizer(engine, dataloader, metric_fn, global_scores)

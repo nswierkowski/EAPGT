@@ -7,10 +7,10 @@ from src.data.ba_shapes.generator import BAShapesGenerator
 class BAShapesDataset(InMemoryDataset):
     def __init__(self, root: str, config: dict, pre_transform: Optional[Callable] = None):
         self.config = config
-        self.num_samples = config.get('num_samples', 1000)
+        self.num_samples = config['dataset']['num_samples']# .get('num_samples', 1000)
         self.generator = BAShapesGenerator(
-            num_base_nodes=config.get('num_base_nodes', 15),
-            m_edges=config.get('m_edges', 1)
+            num_base_nodes=config['generation'].get('num_base_nodes', 15),
+            m_edges=config['generation'].get('m_edges', 1)
         )
         super().__init__(root, transform=None, pre_transform=pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)

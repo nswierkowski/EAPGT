@@ -2,12 +2,6 @@ experiment:
   random_state: 42
   save_dir: "./outputs/eap_results/ba_shapes_hybrid/graphgps/"
 
-# data:
-#   dataset_name: "ba_shapes" # or "zinc"
-#   data_path: "./data/zinc_processed.pt"
-#   counterfactual_path: "./data/zinc_counterfactuals.pt"
-#   batch_size: 32
-
 dataset:
   name: ba_shapes
   root_dir: ./data/ba_shapes

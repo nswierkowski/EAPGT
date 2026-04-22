@@ -45,6 +45,7 @@ class GraphGPSModel(BaseGraphTransformer):
         pretrained_path = model_config.get('pretrained_path', None)
         if pretrained_path and pretrained_path.endswith('.ckpt'):
             self._load_checkpoint(pretrained_path)
+            
 
     def _load_checkpoint(self, path):
         print(f"Loading GraphGPS checkpoint from {path}...")
@@ -133,9 +134,24 @@ class GraphGPSModel(BaseGraphTransformer):
         return out
 
     def get_patchable_components(self):
-        components = {}
+        components = {
+            "minar_pe_encoder": getattr(self.encoder, 'pe_encoder', None),
+            "minar_edge_encoder": getattr(self.encoder, 'edge_encoder', None),
+        }
+        
         for i, layer in enumerate(self.layers):
-            components[f'layer_{i}_local_mpnn'] = layer.conv
-            components[f'layer_{i}_global_attn'] = layer.attn
-            components[f'layer_{i}_mlp'] = layer.mlp
-        return components
+            components[f'minar_layer_{i}_local_mpnn'] = layer.conv            
+            
+            components[f'classic_layer_{i}_global_attn'] = layer.attn
+            
+            if hasattr(layer, 'mlp') and isinstance(layer.mlp, nn.Sequential):
+                components[f'classic_layer_{i}_mlp_linear1'] = layer.mlp[0]  
+                components[f'classic_layer_{i}_mlp_linear2'] = layer.mlp[3]  
+            else:
+                components[f'classic_layer_{i}_mlp'] = layer.mlp
+                
+        if hasattr(self, 'head') and isinstance(self.head, nn.Sequential):
+             components['classic_head_linear1'] = self.head[0]
+             components['classic_head_linear2'] = self.head[3]
+            
+        return {k: v for k, v in components.items() if v is not None}

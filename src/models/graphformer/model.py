@@ -96,8 +96,12 @@ class GraphormerModel(BaseGraphTransformer):
         return outputs.logits
         
     def get_patchable_components(self):
-        layers = self.hf_model.encoder.graph_encoder.layers
-        return {
-            "self_attentions": [layer.self_attn for layer in layers],
-            "mlps": [layer.fc1 for layer in layers]
+        encoder = self.hf_model.encoder.graph_encoder
+        components = {
+            "minar_node_encoder": encoder.graph_node_feature,
+            "minar_edge_attn_bias": encoder.graph_attn_bias, 
+            
+            "classic_attentions": [layer.self_attn for layer in encoder.layers],
+            "classic_mlps": [layer.fc1 for layer in encoder.layers]
         }
+        return components

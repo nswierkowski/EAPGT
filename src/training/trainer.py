@@ -5,10 +5,12 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, optimizer, device, config):
+
+    def __init__(self, model, train_loader, val_loader, test_loader, optimizer, device, config):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.test_loader = test_loader
         self.optimizer = optimizer
         self.device = device
         self.config = config
@@ -64,31 +66,29 @@ class Trainer:
             total_loss += loss.item() * labels.size(0)
             preds = torch.argmax(logits, dim=1)
             
-        
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             
         avg_loss = total_loss / len(all_labels)
         
-        
         precision, recall, f1, _ = precision_recall_fscore_support(
             all_labels, all_preds, average='macro', zero_division=0
         )
-        
         
         correct = sum(p == l for p, l in zip(all_preds, all_labels))
         accuracy = (correct / len(all_labels)) * 100
         
         return avg_loss, accuracy, precision, recall, f1
 
-    def validate(self, epoch):
+
+    def _evaluate(self, loader):
         self.model.eval()
         total_loss = 0
         all_preds = []
         all_labels = []
         
         with torch.no_grad():
-            for batch in self.val_loader:
+            for batch in loader:
                 batch_data, labels = self._process_batch(batch)
                 
                 outputs = self.model(batch_data)
@@ -112,6 +112,10 @@ class Trainer:
         accuracy = (correct / num_samples) * 100
         
         return avg_loss, accuracy, precision, recall, f1
+
+
+    def validate(self, epoch):
+        return self._evaluate(self.val_loader)
 
     def fit(self):
         print(f"Starting training for {self.epochs} epochs...")
@@ -140,6 +144,25 @@ class Trainer:
                 
         self.writer.close()
         print("Training Complete!")
+
+
+    def test(self):
+        if self.test_loader is None:
+            print("No test loader configured. Skipping test phase.")
+            return
+            
+        print("\n" + "="*50)
+        print("RUNNING FINAL EVALUATION ON TEST SET")
+        print("="*50)
+                
+        test_loss, test_acc, test_prec, test_rec, test_f1 = self._evaluate(self.test_loader)
+        
+        print(f"Test Loss:      {test_loss:.4f}")
+        print(f"Test Accuracy:  {test_acc:.2f}%")
+        print(f"Test Precision: {test_prec:.4f}")
+        print(f"Test Recall:    {test_rec:.4f}")
+        print(f"Test F1 Score:  {test_f1:.4f}")
+        print("="*50 + "\n")
 
     def save_checkpoint(self, epoch):
         checkpoint = {

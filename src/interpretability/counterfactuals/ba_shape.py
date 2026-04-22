@@ -1,5 +1,6 @@
 import torch
 import copy
+import random
 from torch_geometric.data import Data
 from .base import CounterfactualEngine
 
@@ -9,32 +10,36 @@ class BAShapesCounterfactual(CounterfactualEngine):
         
         if data.y.item() == 1:
             num_nodes = data.num_nodes
-            keep_nodes = num_nodes - 5
+            base_nodes = num_nodes - 5
             
-            corrupted.x = data.x[:keep_nodes]
+            m_nodes = list(range(base_nodes, num_nodes))
             
-            edge_index = data.edge_index
-            mask = (edge_index[0] < keep_nodes) & (edge_index[1] < keep_nodes)
-            corrupted.edge_index = edge_index[:, mask]
+            mask = (data.edge_index[0] >= base_nodes) & (data.edge_index[1] >= base_nodes)
+            
+            new_edges = []
+            
+            center_node = m_nodes[0]
+            for leaf_node in m_nodes[1:]:
+                new_edges.append([center_node, leaf_node])
+                new_edges.append([leaf_node, center_node]) 
+            
+            existing_edges = set(map(tuple, data.edge_index.t().tolist()))
+            added_anchors = 0
+            
+            while added_anchors < 2:
+                u = random.choice(m_nodes)
+                v = random.randint(0, base_nodes - 1)
+                
+                if (u, v) not in existing_edges and (v, u) not in existing_edges:
+                    new_edges.append([u, v])
+                    new_edges.append([v, u]) 
+                    existing_edges.add((u, v))
+                    existing_edges.add((v, u))
+                    added_anchors += 1
+                    
+            new_edge_tensor = torch.tensor(new_edges, dtype=torch.long).t().to(data.edge_index.device)
+            corrupted.edge_index[:, mask] = new_edge_tensor
             
             corrupted.y = torch.tensor([0], dtype=torch.long)
             
-        else:
-            num_nodes = data.num_nodes
-            house_edges = torch.tensor([
-                [0, 1], [1, 2], [2, 0], 
-                [1, 3], [2, 4], [3, 4]  
-            ], dtype=torch.long).t()
-            
-            house_edges += num_nodes
-            
-            connection = torch.tensor([[0, num_nodes]], dtype=torch.long).t()
-            
-            corrupted.edge_index = torch.cat([data.edge_index, house_edges, connection], dim=1)
-            
-            new_features = torch.zeros((5, data.x.size(1))) 
-            corrupted.x = torch.cat([data.x, new_features], dim=0)
-            
-            corrupted.y = torch.tensor([1], dtype=torch.long)
-
         return corrupted

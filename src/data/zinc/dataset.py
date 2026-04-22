@@ -11,7 +11,7 @@ from src.data.zinc.filter import ChemistryFilter
 from src.data.zinc.converter import MolToGraphConverter
 
 class ZINCNO2Dataset(InMemoryDataset):
-    """Downloads ZINC CSV, extracts graphs, balances labels, applies transforms, and saves."""
+    """Downloads ZINC CSV, extracts graphs, preserves distribution, applies stratified splits and transforms, and saves."""
     
     def __init__(self, root: str, config: dict, pre_transform: Optional[Callable] = None):
         self.config = config
@@ -40,8 +40,8 @@ class ZINCNO2Dataset(InMemoryDataset):
         return ['zinc_no2_data.pt']
 
     def download(self):
-        print(f"Downloading raw ZINC CSV from {self.config['csv_url']}...")
-        urllib.request.urlretrieve(self.config['csv_url'], self.raw_paths[0])
+        print(f"Downloading raw ZINC CSV from {self.config['dataset']['csv_url']}...")
+        urllib.request.urlretrieve(self.config['dataset']['csv_url'], self.raw_paths[0])
 
     def process(self):
         print("Parsing SMILES and extracting graphs...")
@@ -72,42 +72,49 @@ class ZINCNO2Dataset(InMemoryDataset):
                 neg_graphs.append(data)
 
         print(f"Found {len(pos_graphs)} positive and {len(neg_graphs)} negative samples.")
-        min_len = min(len(pos_graphs), len(neg_graphs))
         
-        random.seed(42)
+        seed = self.config.get('seed', self.config.get('generation', {}).get('seed', 42))
+        
+        random.seed(seed)
+        random.shuffle(pos_graphs)
         random.shuffle(neg_graphs)
         
-        balanced_graphs = pos_graphs[:min_len] + neg_graphs[:min_len]
-        random.shuffle(balanced_graphs)
-        print(f"Balanced dataset size: {len(balanced_graphs)} graphs.")
-
         splits = self.config['splits']
-        num_graphs = len(balanced_graphs)
-        train_end = int(splits['train'] * num_graphs)
-        val_end = train_end + int(splits['val'] * num_graphs)
-        test_end = val_end + int(splits['test'] * num_graphs)
+        
+        def assign_splits(graph_list):
+            num_graphs = len(graph_list)
+            train_end = int(splits['train'] * num_graphs)
+            val_end = train_end + int(splits.get('val', 0.1) * num_graphs)
+            test_end = val_end + int(splits.get('test', 0.1) * num_graphs)
+            
+            for i, data in enumerate(graph_list):
+                if i < train_end:
+                    data.split_mask = torch.tensor([0])
+                elif i < val_end:
+                    data.split_mask = torch.tensor([1])
+                elif i < test_end:
+                    data.split_mask = torch.tensor([2])
+                else:
+                    data.split_mask = torch.tensor([3])
+
+        assign_splits(pos_graphs)
+        assign_splits(neg_graphs)
+        
+        all_graphs = pos_graphs + neg_graphs
+        random.shuffle(all_graphs)
+        print(f"Total dataset size: {len(all_graphs)} graphs (Seed: {seed}).")
 
         saved_smiles = []
         processed_graphs = []
         
-        for i, data in enumerate(balanced_graphs):
+        for data in all_graphs:
             saved_smiles.append(data.smiles)
             del data.smiles 
             
             if self.pre_transform is not None:
                 data = self.pre_transform(data)
-            
-            if i < train_end:
-                data.split_mask = torch.tensor([0]) 
-            elif i < val_end:
-                data.split_mask = torch.tensor([1]) 
-            elif i < test_end:
-                data.split_mask = torch.tensor([2]) 
-            else:
-                data.split_mask = torch.tensor([3]) 
                 
             processed_graphs.append(data)
         
         torch.save(saved_smiles, os.path.join(self.processed_dir, 'smiles.pt'))        
         torch.save(processed_graphs, self.processed_paths[0])
-    
