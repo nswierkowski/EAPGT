@@ -14,7 +14,7 @@ class BAShapesCounterfactual(CounterfactualEngine):
             
             m_nodes = list(range(base_nodes, num_nodes))
             
-            mask = (data.edge_index[0] >= base_nodes) & (data.edge_index[1] >= base_nodes)
+            mask = (data.edge_index[0] >= base_nodes) | (data.edge_index[1] >= base_nodes)
             
             new_edges = []
             
@@ -26,7 +26,7 @@ class BAShapesCounterfactual(CounterfactualEngine):
             existing_edges = set(map(tuple, data.edge_index.t().tolist()))
             added_anchors = 0
             
-            while added_anchors < 2:
+            while added_anchors < 3: 
                 u = random.choice(m_nodes)
                 v = random.randint(0, base_nodes - 1)
                 
@@ -38,6 +38,7 @@ class BAShapesCounterfactual(CounterfactualEngine):
                     added_anchors += 1
                     
             new_edge_tensor = torch.tensor(new_edges, dtype=torch.long).t().to(data.edge_index.device)
+            
             corrupted.edge_index[:, mask] = new_edge_tensor
             
             corrupted.y = torch.tensor([0], dtype=torch.long)

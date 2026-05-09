@@ -1,0 +1,40 @@
+experiment:
+  random_state: 42
+  save_dir: "./outputs/eap_results/zinc/graphformer/classic/"
+
+dataset:
+  name: "zinc_no2"
+  root_dir: "./data/zinc_no2"
+  csv_url: "https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv"
+  transform: graphormer
+  counterfactual_path: "./data/zinc_no2/counterfactuals.pt"
+  batch_size: 32
+
+
+model:
+  name: "graphformer"
+  architecture: "graphformer" # or "graphformer"
+  checkpoint_path: "./checkpoints/zinc_graphformer/checkpoint_epoch_15.pt"  
+  pretrained_path: clefourrier/graphormer-base-pcqm4mv2
+  num_layers: 16      
+  hidden_dim: 256      
+  num_heads: 8         
+  dropout: 0.1        
+
+  num_classes: 2       
+  input_dim: 10        
+
+  pe_type: rwpe
+  pe_dim: 20           
+  walk_length: 16 
+
+eap:
+  strategy: "macro_minar" 
+  circuit_threshold_percentile: 0.0
+  
+optimizer:
+  mode: "binary_search" # or "sweep" "binary_search"
+  metric: "f1"
+  max_degradation: 0.0001 # Allow max 5% drop in F1 score
+  tolerance: 0.0005 # Binary search precision
+  sweep_percentiles: [0.01, 0.02, 0.04, 0.045, 0.05, 0.1, 0.2] # Used if mode is 'sweep'

@@ -3,10 +3,21 @@ import yaml
 import argparse
 import copy
 from src.data.factory import get_dataset
+import random       
+import numpy as np  
+import torch
+import json
 
 def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as file:
         return yaml.safe_load(file)
+    
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate datasets for Graph Transformer thesis.")
@@ -15,6 +26,10 @@ def main():
 
     base_config = load_config(args.config)
     print(f"Loaded configuration from {args.config}")
+
+    seed = base_config.get('experiment', {}).get('random_state', 42)
+    set_seed(seed)
+    print(f"Global seed locked to {seed}")
 
     dataset_name = base_config['dataset']['name']
     original_root_dir = base_config['dataset']['root_dir']

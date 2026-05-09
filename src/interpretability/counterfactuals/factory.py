@@ -38,20 +38,40 @@ def get_counterfactual_dataset(config, base_dataset=None):
     transform = get_transform(config)
     
     counterfactuals = []
+    
+    skipped_count = 0
+    success_count = 0
+    
     print(f"LEN OF base_dataset: {len(base_dataset)}")
     for i in tqdm(range(len(base_dataset)), desc="Generating Pairs"):
         clean_data = base_dataset[i]
         
+        # Generate counterfactual (it deepcopies the already-transformed clean_data)
         corrupted_data = engine.generate(clean_data)
         
-        if transform:
-            corrupted_data = transform(corrupted_data)
+        # Detect if the example was skipped or failed
+        if corrupted_data is clean_data or corrupted_data is None:
+            skipped_count += 1
+            continue
+            
+        # REMOVED the `if transform: corrupted_data = transform(corrupted_data)` block here!
             
         counterfactuals.append({
             'index': i,
             'clean': clean_data,
             'corrupted': corrupted_data
         })
+        success_count += 1
+
+    print(f"\n[{'='*40}]")
+    print(f"[Counterfactuals] Generation Summary:")
+    print(f"  Total Processed:  {len(base_dataset)}")
+    print(f"  Successfully Generated: {success_count}")
+    print(f"  Lost/Skipped:     {skipped_count}")
+    print(f"[{'='*40}]\n")
+
+    if success_count == 0:
+        print("WARNING: No counterfactuals were generated! Check your generation logic.")
         
     torch.save(counterfactuals, cf_path)
     print(f"Saved {len(counterfactuals)} counterfactual pairs to {cf_path}")

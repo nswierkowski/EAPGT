@@ -1,58 +1,55 @@
+from src.models.wrappers.attention_mpnn import WrappedAttentionMPNN
+from src.models.wrappers.base import BaseMPNNWrapper
 import torch.nn as nn
+from collections import OrderedDict
 from typing import Dict
 from .base import BaseEAP
 
-class AbstractStrategyEAP(BaseEAP):
-    """
-    Provides a shared utility to normalize the patchable components 
-    returned by the different GNN architectures into a flat dictionary.
-    """
-    def _get_flat_components(self) -> Dict[str, nn.Module]:
-        raw_components = self.model.get_patchable_components()
-        flat_components = {}
+
+class MacroMinarEAP(BaseEAP):
+    def get_target_modules(self) -> dict[str, nn.Module]:
+        target_modules = OrderedDict()
         
-        for key, val in raw_components.items():
-            if val is None:
+        # --- NEW: Blacklist conditionally bypassed encoders ---
+        skip_prefixes = [
+            'encoder.pe_encoder', 
+            'pe_encoder',
+            'encoder.node_encoder', # Optional: skip node encoder for speed
+            'encoder.edge_encoder'  # Optional: skip edge encoder for speed
+        ]
+        
+        valid_leaf_types = (
+            nn.Linear
+        ) 
+
+        for name, module in self.model.named_modules():
+            if name == "": 
+                continue 
+            
+            if any(name.startswith(p) for p in skip_prefixes):
                 continue
+
+            if isinstance(module, BaseMPNNWrapper) or isinstance(module, WrappedAttentionMPNN):
+                target_modules[f"{name}.M"] = module.message_module
+                target_modules[f"{name}.A"] = module.aggregate_module
+                target_modules[f"{name}.U"] = module.update_module
+                skip_prefixes.append(f"{name}.")
                 
-            if isinstance(val, list) or isinstance(val, nn.ModuleList):
-                for i, mod in enumerate(val):
-                    flat_components[f"{key}_{i}"] = mod
-            elif isinstance(val, dict):
-                for k, v in val.items():
-                    flat_components[f"{key}_{k}"] = v
-            else:
-                flat_components[key] = val
+            elif isinstance(module, nn.MultiheadAttention) or module.__class__.__name__ == 'GraphormerMultiheadAttention':
+                target_modules[name] = module
+                skip_prefixes.append(f"{name}.") 
                 
-        return flat_components
-
-
-class ClassicEAP(AbstractStrategyEAP):
-    """
-    NLP-style EAP. 
-    Strictly targets Transformer components like Attention and MLPs.
-    """
-    def get_target_modules(self) -> Dict[str, nn.Module]:
-        all_components = self._get_flat_components()
-
-        return {k: v for k, v in all_components.items() if 'classic_' in k}
-
-
-class MinarEAP(AbstractStrategyEAP):
-    """
-    Graph-style EAP.
-    Strictly targets Message Passing layers and topological encodings.
-    """
-    def get_target_modules(self) -> Dict[str, nn.Module]:
-        all_components = self._get_flat_components()
-
-        return {k: v for k, v in all_components.items() if 'minar_' in k}
-
-
-class HybridEAP(AbstractStrategyEAP):
-    """
-    Full Architecture EAP.
-    Targets all components returned by the model.
-    """
-    def get_target_modules(self) -> Dict[str, nn.Module]:
-        return self._get_flat_components()
+            elif module.__class__.__name__ == 'WrappedGraphormerGraphAttnBias':
+                target_modules[f"{name}.spatial_encoding"] = module.spatial_tracker
+                target_modules[f"{name}.edge_encoding"] = module.edge_tracker
+                target_modules[f"{name}.combined_bias"] = module.combined_tracker
+                
+                skip_prefixes.append(f"{name}.")
+                
+            elif isinstance(module, valid_leaf_types):
+                target_modules[name] = module
+                
+        if not target_modules:
+            print("WARNING: No target modules found.")
+            
+        return target_modules

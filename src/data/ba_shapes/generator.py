@@ -11,13 +11,11 @@ class BAShapesGenerator:
         self.motif_generator = HouseMotif()
 
     def generate_sample(self, has_motif: bool) -> Tuple[nx.Graph, int]:
-        n_base = self.num_base_nodes if has_motif else self.num_base_nodes + 5
-        graph = nx.barabasi_albert_graph(n_base, self.m_edges)
-        
-        label = 1 if has_motif else 0
-
         if has_motif:
-            motif_graph, _ = self.motif_generator.generate_motif()
+            n_base = self.num_base_nodes
+            graph = nx.barabasi_albert_graph(n_base, self.m_edges)
+            
+            motif_graph, _ = self.motif_generator.generate_motif() 
             
             mapping = {n: n + n_base for n in motif_graph.nodes()}
             motif_graph = nx.relabel_nodes(motif_graph, mapping)
@@ -27,6 +25,22 @@ class BAShapesGenerator:
             
             base_connection_point = random.randint(0, n_base - 1)
             motif_connection_point = mapping[4] 
-            graph.add_edge(base_connection_point, motif_connection_point)
+            graph.add_edge(base_connection_point, motif_connection_point) 
+            
+            label = 1
+            
+        else:
+            n_base = self.num_base_nodes + 5
+            graph = nx.barabasi_albert_graph(n_base, self.m_edges) 
+            
+            edges_added = 0
+            while edges_added < 2:
+                u = random.randint(0, n_base - 1)
+                v = random.randint(0, n_base - 1)
+                if u != v and not graph.has_edge(u, v):
+                    graph.add_edge(u, v)
+                    edges_added += 1
+                    
+            label = 0
 
         return graph, label

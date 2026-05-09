@@ -8,10 +8,12 @@ class BAShapesDataset(InMemoryDataset):
     def __init__(self, root: str, config: dict, pre_transform: Optional[Callable] = None):
         self.config = config
         self.num_samples = config['dataset']['num_samples']# .get('num_samples', 1000)
-        self.generator = BAShapesGenerator(
-            num_base_nodes=config['generation'].get('num_base_nodes', 15),
-            m_edges=config['generation'].get('m_edges', 1)
-        )
+        
+        if 'generation' in config:
+            self.generator = BAShapesGenerator(
+                num_base_nodes=config['generation'].get('num_base_nodes', 15),
+                m_edges=config['generation'].get('m_edges', 1)
+            )
         super().__init__(root, transform=None, pre_transform=pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
@@ -41,14 +43,46 @@ class BAShapesDataset(InMemoryDataset):
                 
             data_list.append(data)
         
+        num_graphs = len(data_list)
+        seed = self.config.get('experiment', {}).get('random_state', 42)
+        g = torch.Generator()
+        g.manual_seed(seed)
+        
+        indices = torch.randperm(num_graphs, generator=g)
+        split_ratios = self.config.get('splits', {'train': 0.7, 'val': 0.1, 'test': 0.2, 'eap': 0.0})
+        
+        train_end = int(split_ratios['train'] * num_graphs)
+        val_end = train_end + int(split_ratios['val'] * num_graphs)
+        test_end = val_end + int(split_ratios['test'] * num_graphs)
+        
+        train_indices = indices[:train_end]
+        val_indices = indices[train_end:val_end]
+        test_indices = indices[val_end:test_end]
+        eap_indices = indices[test_end:]
+        
+        for idx in train_indices:
+            data_list[idx].split_mask = torch.tensor(0)
+        for idx in val_indices:
+            data_list[idx].split_mask = torch.tensor(1)
+        for idx in test_indices:
+            data_list[idx].split_mask = torch.tensor(2)
+        for idx in eap_indices:
+            data_list[idx].split_mask = torch.tensor(3)
+        
         torch.save(self.collate(data_list), self.processed_paths[0])
 
+
     def get_split_indices(self) -> Dict[str, torch.Tensor]:
-        """Returns indices for Graph-level splits (Train/Val/Test/EAP)."""
+        """Returns deterministic indices for Graph-level splits (Train/Val/Test/EAP)."""
         num_graphs = len(self)
-        indices = torch.randperm(num_graphs)
         
-        splits = self.config.get('splits', {'train': 0.7, 'val': 0.1, 'test': 0.1, 'eap': 0.1})
+        seed = self.config.get('experiment', {}).get('random_state', 42)
+        g = torch.Generator()
+        g.manual_seed(seed)
+        
+        indices = torch.randperm(num_graphs, generator=g)
+        
+        splits = self.config.get('splits', {'train': 0.7, 'val': 0.1, 'test': 0.2, 'eap': 0.0})
         
         train_end = int(splits['train'] * num_graphs)
         val_end = train_end + int(splits['val'] * num_graphs)

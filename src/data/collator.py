@@ -8,25 +8,20 @@ class GraphTransformerCollator:
     or dense tensor padding (for Graphormer).
     """
     def __init__(self, config, pad_token_id=0):
-        self.model_name = config.get('model', {}).get('name', 'graphormer').lower()
+        self.model_name = config.get('model', {}).get('name', 'graphgps').lower()
         self.pad_token_id = pad_token_id
         
     def __graphgps_collate(self, batch):
+        # Explicitly remove ONLY the dense Graphormer matrices that break PyG batching.
+        # DO NOT use dynamic shape checks, or you will accidentally delete Positional Encodings!
+        unbatchable_keys = ['spatial_pos', 'attn_bias', 'edge_input', 'in_degree', 'out_degree', 'shortest_path']
+        
         for data in batch:
-            keys_to_remove = []
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.dim() == 2:
-
-                    if v.size(0) == v.size(1) and v.size(0) == data.num_nodes:
-                        keys_to_remove.append(k)
-
-                elif isinstance(v, torch.Tensor) and v.dim() == 3 and k == 'edge_input':
-                        keys_to_remove.append(k)
-            
-            for k in keys_to_remove:
+            for k in unbatchable_keys:
                 if hasattr(data, k):
                     delattr(data, k)
                     
+        from torch_geometric.data import Batch
         return Batch.from_data_list(batch)
     
     def __graphormer_collate(self, batch):

@@ -20,6 +20,8 @@ class Trainer:
         self.epochs = config.get('epochs', 100)
         self.save_every = config.get('save_every_n_epochs', 10)
         
+        self.l1_lambda = config.get('l1_lambda', 0.0)
+        
         self.checkpoint_dir = config.get('checkpoint_dir', 'checkpoints')
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -60,9 +62,20 @@ class Trainer:
             logits = outputs.logits if hasattr(outputs, 'logits') else outputs
             
             loss = self.criterion(logits, labels)
+            
+            if self.l1_lambda > 0:
+                l1_penalty = torch.tensor(0., device=self.device)
+                for name, param in self.model.named_parameters():
+
+                    if 'weight' in name:
+                        l1_penalty += torch.norm(param, p=1)
+                
+                loss = loss + (self.l1_lambda * l1_penalty)
+            
             loss.backward()
             self.optimizer.step()
             
+
             total_loss += loss.item() * labels.size(0)
             preds = torch.argmax(logits, dim=1)
             
