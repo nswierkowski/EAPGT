@@ -14,7 +14,7 @@ dataset:
 model:
   name: "graphformer"
   architecture: "graphformer" # or "graphformer"
-  checkpoint_path: "./checkpoints/zinc_graphformer/checkpoint_epoch_15.pt"  
+  checkpoint_path: "./checkpoints/zinc_graphformer/checkpoint_epoch_60.pt"  
   pretrained_path: clefourrier/graphormer-base-pcqm4mv2
   num_layers: 16      
   hidden_dim: 256      

@@ -4,7 +4,7 @@
   
 model:
   name: graphgps
-  pretrained_path: ./data/weights/148.ckpt
+  #pretrained_path: ./data/weights/148.ckpt
 
   num_layers: 16      
   hidden_dim: 256      

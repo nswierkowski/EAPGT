@@ -28,6 +28,8 @@ class GraphormerModel(BaseGraphTransformer):
         input_dim = model_config.get('input_dim', 10)
         
         hidden_size = model_config.get('hidden_dim', 768)
+        
+        print(f"Model Config: hidden_dim={hidden_size}, num_layers={model_config.get('num_layers', 'default')}, num_heads={model_config.get('num_heads', 'default')}")
         num_layers = model_config.get('num_layers', 12)
         num_heads = model_config.get('num_heads', 32)
         
@@ -41,8 +43,6 @@ class GraphormerModel(BaseGraphTransformer):
             
             if checkpoint_path:
                 self._load_checkpoint(checkpoint_path)
-            else:
-                raise RuntimeError("NO CHECKPOINT")
             
             if hf_config.num_labels != num_classes:
                 print(f"Replacing classification head: {hf_config.num_labels} -> {num_classes} classes")
@@ -52,7 +52,7 @@ class GraphormerModel(BaseGraphTransformer):
                 else:
                     self.hf_model.classifier = nn.Linear(self.hf_model.config.hidden_size, num_classes)
         else:
-            raise RuntimeError("Should read model xdd")
+            #raise RuntimeError("Should read model xdd")
             print(f"Initializing untrained Graphormer from scratch (Layers: {num_layers}, Dim: {hidden_size}, Heads: {num_heads}).")
             hf_config = GraphormerConfig(
                 num_labels=num_classes,
@@ -61,6 +61,14 @@ class GraphormerModel(BaseGraphTransformer):
                 num_attention_heads=num_heads
             )
             self.hf_model = GraphormerForGraphClassification(hf_config)
+            
+            if hf_config.num_labels != num_classes:
+                print(f"Replacing classification head: {hf_config.num_labels} -> {num_classes} classes")
+                self.hf_model.config.num_labels = num_classes
+                if hasattr(self.hf_model.classifier, 'out_proj'):
+                    self.hf_model.classifier.out_proj = nn.Linear(self.hf_model.classifier.out_proj.in_features, num_classes)
+                else:
+                    self.hf_model.classifier = nn.Linear(self.hf_model.config.hidden_size, num_classes)
 
         if dataset_name == 'ba_shapes':
             print("Detected BA-Shapes: Applying ContinuousFeatureEncoder patch.")

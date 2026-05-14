@@ -60,6 +60,12 @@ prepare_eap_ba_shape_graphformer_attention:
 prepare_eap_ba_shape_graphformer_classic:
 	PYTHONPATH=. python3 script/run_eap.py --config config/eap/ba_shape/graphformer_ba_classic.yaml
 
+prepare_eap_ba_shape:
+	$(MAKE) prepare_eap_ba_shape_graphgps_mpnn
+	$(MAKE) prepare_eap_ba_shape_graphgps_attention
+	$(MAKE) prepare_eap_ba_shape_graphgps_classic
+	$(MAKE) prepare_eap_ba_shape_graphformer_attention
+	$(MAKE) prepare_eap_ba_shape_graphformer_classic
 # -------------------------------------------------------------
 
 prepare_eap_zinc_graphgps_mpnn:
@@ -80,6 +86,12 @@ prepare_eap_zinc_graphformer_attention:
 prepare_eap_zinc_graphformer_classic:
 	PYTHONPATH=. python3 script/run_eap.py --config config/eap/zinc/graphformer_ba_classic.yaml
 
+prepare_eap_zinc:
+	$(MAKE) prepare_eap_zinc_graphgps_mpnn
+	$(MAKE) prepare_eap_zinc_graphgps_attention
+	$(MAKE) prepare_eap_zinc_graphgps_classic
+	$(MAKE) prepare_eap_zinc_graphformer_attention
+	$(MAKE) prepare_eap_zinc_graphformer_classic
 # -------------------------------------------------------------
 
 optimize_graphgps_ba_classic:
@@ -94,12 +106,18 @@ optimize_graphgps_ba_attention:
 optimize_graphformer_ba_classic:
 	PYTHONPATH=. python3 script/optimize_threshold.py --config config/eap/ba_shape/graphformer_ba_classic.yaml --tolerance 0.01
 
-optimize_graphformer_ba_mpnn:
-	PYTHONPATH=. python3 script/optimize_threshold.py --config config/eap/ba_shape/graphformer_ba_mpnn.yaml --tolerance 0.01
+# optimize_graphformer_ba_mpnn:
+# 	PYTHONPATH=. python3 script/optimize_threshold.py --config config/eap/ba_shape/graphformer_ba_mpnn.yaml --tolerance 0.01
 
 optimize_graphformer_ba_attention:
 	PYTHONPATH=. python3 script/optimize_threshold.py --config config/eap/ba_shape/graphformer_ba_mpnn_attention.yaml --tolerance 0.01
 
+optimize_eap_ba_shape:
+	$(MAKE) optimize_graphgps_ba_classic
+	$(MAKE) optimize_graphgps_ba_mpnn
+	$(MAKE) optimize_graphgps_ba_attention
+	$(MAKE) optimize_graphformer_ba_classic
+	$(MAKE) optimize_graphformer_ba_attention
 # -------------------------------------------------------------
 
 optimize_graphgps_zinc_classic:
@@ -120,3 +138,9 @@ optimize_graphformer_zinc_mpnn:
 optimize_graphformer_zinc_attention:
 	PYTHONPATH=. python3 script/optimize_threshold.py --config config/eap/zinc/graphformer_ba_mpnn_attention.yaml --tolerance 0.01
 
+optimize_eap_zinc:
+	$(MAKE) optimize_graphgps_zinc_classic
+	$(MAKE) optimize_graphgps_zinc_mpnn
+	$(MAKE) optimize_graphgps_zinc_attention
+	$(MAKE) optimize_graphformer_zinc_classic
+	$(MAKE) optimize_graphformer_zinc_attention

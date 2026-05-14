@@ -12,7 +12,7 @@ dataset:
 
 model:
   architecture: "graphgps" # or "graphormer"
-  checkpoint_path: "./checkpoints/zinc_graphgps/checkpoint_epoch_20.pt"  
+  checkpoint_path: "./checkpoints/zinc_graphgps/checkpoint_epoch_60.pt"  
   num_layers: 16      
   hidden_dim: 256      
   num_heads: 8         

@@ -13,7 +13,7 @@ dataset:
 
 model:
   architecture: "graphgps" # or "graphormer"
-  checkpoint_path: "./checkpoints/ba_shapes_graphdps/checkpoint_epoch_20.pt"  
+  checkpoint_path: "./checkpoints/ba_shapes_graphdps/checkpoint_epoch_60.pt"  
   num_layers: 16      
   hidden_dim: 256      
   num_heads: 8         
@@ -26,6 +26,9 @@ model:
   pe_dim: 20           
   walk_length: 16 
 
+  target_wrapper_classes: 
+    - "ResGatedGraphConv"
+    - "MultiheadAttention"
 eap:
   strategy: "macro_minar" 
   circuit_threshold_percentile: 0.0

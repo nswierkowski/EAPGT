@@ -20,7 +20,7 @@ class Trainer:
         self.epochs = config.get('epochs', 100)
         self.save_every = config.get('save_every_n_epochs', 10)
         
-        self.l1_lambda = config.get('l1_lambda', 0.0)
+        self.l1_lambda = config.get('l1_lambda', 1.0)
         
         self.checkpoint_dir = config.get('checkpoint_dir', 'checkpoints')
         os.makedirs(self.checkpoint_dir, exist_ok=True)

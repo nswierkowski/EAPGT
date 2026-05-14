@@ -2,7 +2,8 @@ import os
 import yaml
 import torch
 import argparse
-from torch_geometric.loader import DataLoader
+# from torch_geometric.loader import DataLoader
+from torch.utils.data import DataLoader
 
 from src.models.wrapper import instrument_model
 from src.models.graphgps.model import GraphGPSModel 
@@ -15,7 +16,7 @@ from src.interpretability.eap.optimizer import ThresholdOptimizer
 def get_model(config):
     if config['model']['architecture'] == 'graphgps':
         return GraphGPSModel(config)
-    elif config['model']['architecture'] == 'graphormer':
+    elif config['model']['architecture'] == 'graphformer':
         return GraphormerModel(config)
     raise ValueError(f"Unknown architecture: {config['model']['architecture']}")
 
@@ -85,10 +86,21 @@ def main():
          raise FileNotFoundError(f"Run run_eap.py first! Could not find {attr_path}")
     attributions = torch.load(attr_path, map_location=device)
 
+    node_attr_path = os.path.join(save_dir, 'node_attributions.pt')
+    node_attributions = None
+    if os.path.exists(node_attr_path):
+        print(f"Loading node attributions from {node_attr_path}...")
+        node_attributions = torch.load(node_attr_path, map_location=device)
+    else:
+        print(f"Warning: node_attributions.pt not found at {node_attr_path}. Faithfulness evaluation will be skipped.")
+
     optimizer = ThresholdOptimizer(
-        engine, model, val_dataloader, test_dataloader, device, tolerance=args.tolerance
+        engine, model, val_dataloader, test_dataloader, device, 
+        tolerance=args.tolerance, 
+        dataset_name=config['dataset']['name'],
+        config=config
     )
-    optimizer.optimize(attributions, save_dir)
+    optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
 
 if __name__ == "__main__":
     main()

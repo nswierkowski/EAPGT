@@ -6,18 +6,31 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.metrics import f1_score
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from src.models.wrappers.attention_mpnn import AttentionMessage
 from src.models.wrappers.base import BaseMPNNWrapper
+from src.interpretability.eap.evaluator import GroundTruthEvaluator
+import pandas as pd
+
+# Centralize tuple checks like in base.py
+TUPLE_MODULES = (
+    'GraphormerMultiheadAttention',  
+    'AttentionMessage',              
+    'GraphormerAttentionMessage'
+)
 
 class ThresholdOptimizer:
-    def __init__(self, engine, model, val_dataloader, test_dataloader, device, tolerance: float = 0.05):
+    def __init__(self, engine, model, val_dataloader, test_dataloader, device, tolerance: float = 0.05, prune_heads: bool = True, dataset_name: str = "ba_shapes", config: dict = None):
         self.engine = engine
         self.model = model
         self.val_dataloader = val_dataloader
         self.test_dataloader = test_dataloader
         self.device = device
         self.tolerance = tolerance
+        self.prune_heads = prune_heads
+        self.dataset_name = dataset_name
+        self.config = config
+        self.gt_evaluator = GroundTruthEvaluator(dataset_name, config) if config else None
 
     def create_masks_from_percentile(self, attributions: Dict[str, torch.Tensor], percentile: float):
         """
@@ -31,11 +44,54 @@ class ThresholdOptimizer:
         for name, score_tensor in attributions.items():
             flat_masks[name] = (score_tensor >= threshold_val).float()
             
+        # --- ENFORCE MPNN DEPENDENCIES (M -> A -> U) ---
+        # Rule 1: If M is cut, A and U must be cut.
+        # Rule 2: If A or U cannot be cut, M should not be cut.
+        
+        mpnn_prefixes = set()
+        for name in flat_masks.keys():
+            for part in ['.M', '.A', '.U']:
+                if part in name:
+                    mpnn_prefixes.add(name.split(part)[0])
+        
+        for prefix in mpnn_prefixes:
+            m_keys = [k for k in flat_masks.keys() if k.startswith(prefix + ".M")]
+            a_keys = [k for k in flat_masks.keys() if k.startswith(prefix + ".A")]
+            u_keys = [k for k in flat_masks.keys() if k.startswith(prefix + ".U")]
+            
+            def get_head_map(keys):
+                hmap = {}
+                for k in keys:
+                    if '.head_' in k:
+                        h_idx = k.split('.head_')[-1]
+                        hmap[h_idx] = k
+                    else:
+                        hmap['global'] = k
+                return hmap
+            
+            m_map = get_head_map(m_keys)
+            a_map = get_head_map(a_keys)
+            u_map = get_head_map(u_keys)
+            
+            all_heads = set(m_map.keys()) | set(a_map.keys()) | set(u_map.keys())
+            
+            for h in all_heads:
+                mk = m_map.get(h, m_map.get('global'))
+                ak = a_map.get(h, a_map.get('global'))
+                uk = u_map.get(h, u_map.get('global'))
+                
+                # Tie M, A, and U components together: if any is kept, all are kept.
+                found_keys = [k for k in [mk, ak, uk] if k and k in flat_masks]
+                if found_keys:
+                    combined_mask = torch.max(torch.stack([flat_masks[k] for k in found_keys]), dim=0)[0]
+                    for k in found_keys:
+                        flat_masks[k] = combined_mask
+            
         reconstructed_masks = {}
         head_groups = {}
         
         for name, mask in flat_masks.items():
-            if ".head_" in name:
+            if self.prune_heads and ".head_" in name:
                 parent_name = name.split(".head_")[0]
                 head_idx = int(name.split(".head_")[1])
                 if parent_name not in head_groups:
@@ -151,17 +207,21 @@ class ThresholdOptimizer:
 
                     corrupted_acts = {}
                     
+                    # 1. Forward Trace: Extract corrupted batch activations
                     with self.engine.tracer.trace(corrupted_batch):
                         for name, data in self.engine.target_modules.items():
                             proxy = data['proxy']
                             real_module = data['module']
                             
                             out = proxy.output
-                            if isinstance(real_module, (torch.nn.MultiheadAttention, AttentionMessage)):
+                            is_tuple_output = isinstance(real_module, torch.nn.MultiheadAttention) or real_module.__class__.__name__ in TUPLE_MODULES
+                            
+                            if is_tuple_output:
                                 out = out[0]
                                     
                             corrupted_acts[name] = out.save()
                     
+                    # 2. Forward Trace: Clean batch causal patching
                     with self.engine.tracer.trace(clean_batch):
                         for name, data in self.engine.target_modules.items():
                             if name not in masks:
@@ -171,7 +231,8 @@ class ThresholdOptimizer:
                             real_module = data['module']
                             out = proxy.output
                             
-                            is_tuple_output = isinstance(real_module, (torch.nn.MultiheadAttention, AttentionMessage))
+                            is_tuple_output = isinstance(real_module, torch.nn.MultiheadAttention) or real_module.__class__.__name__ in TUPLE_MODULES
+                            
                             clean_act = out[0] if is_tuple_output else out
                             corr_act = corrupted_acts[name] 
                             mask_tensor = masks[name].to(self.device)
@@ -179,6 +240,7 @@ class ThresholdOptimizer:
                             clean_shape = clean_act.shape
                             mask_shape = mask_tensor.shape
                             
+                            # Safely broadcast mask
                             if len(clean_shape) == 4 and len(mask_shape) == 2:
                                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(2)
                             elif len(clean_shape) == 4 and len(mask_shape) == 1:
@@ -189,10 +251,17 @@ class ThresholdOptimizer:
                                 while len(mask_tensor.shape) < len(clean_shape):
                                     mask_tensor = mask_tensor.unsqueeze(0)
                             
+                            # Apply the patch
                             patched_act = (clean_act * mask_tensor) + (corr_act * (1.0 - mask_tensor))
                             
+
                             if is_tuple_output:
-                                proxy.output = (patched_act, out[1]) 
+                                if real_module.__class__.__name__ == 'GraphormerAttentionMessage':
+                                    # Graphormer's message module returns 3 items: (attn_probs, v, is_seq_first)
+                                    proxy.output = (patched_act, out[1], out[2])
+                                else:
+                                    # Standard MultiheadAttention returns 2 items: (output, weights)
+                                    proxy.output = (patched_act, out[1])
                             else:
                                 proxy.output = patched_act
                                 
@@ -247,9 +316,12 @@ class ThresholdOptimizer:
         print(f"Optimal circuit generated with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
         return G
 
-    def optimize(self, attributions: Dict[str, torch.Tensor], save_dir: str):
+    def optimize(self, attributions: Dict[str, torch.Tensor], save_dir: str, node_attributions: Optional[List[Dict]] = None):
         """Executes the binary search for the optimal pruning threshold on the validation set,
-        then validates the final circuit against the full model on the test set."""
+        then validates the final circuit against the full model on the test set.
+        
+        If node_attributions is provided, also evaluates faithfulness to ground truth.
+        """
         
         print("Calculating Pure Trainer Baseline (Validation)...")
         pure_f1 = self.evaluate_baseline_pure(dataloader=self.val_dataloader)
@@ -306,6 +378,19 @@ class ThresholdOptimizer:
 
             mask_path = os.path.join(save_dir, 'optimal_masks.pt')
             torch.save(best_flat_masks, mask_path)
+            
+            print("\n--- Kept Components in Optimal Circuit ---")
+            kept_components = []
+            for name, mask in best_flat_masks.items():
+                if mask.max() > 0:
+                    score = attributions[name].max().item()
+                    kept_components.append((name, score))
+            
+            # Sort by importance
+            kept_components.sort(key=lambda x: x[1], reverse=True)
+            for name, score in kept_components:
+                print(f" - {name:40} | Score: {score:.6f}")
+                
             self.extract_and_plot_optimal_circuit(attributions, best_percentile, save_dir)
         else:
             print("Warning: Could not find any threshold that meets the tolerance. Skipping test evaluation.")
@@ -325,3 +410,117 @@ class ThresholdOptimizer:
             json.dump(results, f, indent=4)
         
         print(f"\nSaved optimization results to: {results_path}")
+
+        if node_attributions is not None and self.gt_evaluator is not None:
+            print("\n--- Ground Truth Faithfulness Evaluation ---")
+            
+            def run_faithfulness_eval(node_attrs, threshold_percentile=None):
+                all_metrics = []
+                
+                masks = None
+                if threshold_percentile is not None:
+                    masks, _, _ = self.create_masks_from_percentile(attributions, threshold_percentile)
+
+                for entry in tqdm(node_attrs, desc="Evaluating Faithfulness", leave=False):
+                    from torch_geometric.data import Data
+                    dummy_data = Data(x=entry.get('x'), edge_index=entry.get('edge_index'), y=entry.get('y'))
+                    gt_mask = self.gt_evaluator.get_gt_mask(dummy_data)
+                    raw_node_scores = entry['node_scores']
+                    
+                    if masks is not None:
+                        pruned_node_scores = {}
+                        for k, v in raw_node_scores.items():
+                            mask_key = k
+                            if mask_key not in masks and '.head_' in mask_key:
+                                mask_key = mask_key.split('.head_')[0]
+                                
+                            if mask_key in masks and masks[mask_key].max() > 0:
+                                pruned_node_scores[k] = v
+                                
+                        if not pruned_node_scores:
+                            scalar_scores = torch.zeros(gt_mask.shape)
+                        else:
+                            scalar_scores = self.gt_evaluator.aggregate_node_scores(pruned_node_scores, num_nodes=gt_mask.shape[0])
+                    else:
+                        scalar_scores = self.gt_evaluator.aggregate_node_scores(raw_node_scores, num_nodes=gt_mask.shape[0])
+                    
+                    metrics = self.gt_evaluator.calculate_faithfulness_metrics(scalar_scores, gt_mask)
+                    if metrics:
+                        all_metrics.append(metrics)
+                
+                if not all_metrics:
+                    print("Warning: No valid GT samples found for faithfulness evaluation.")
+                    return {k: 0.0 for k in ["auprc", "precision_at_k", "attribution_gap", "mean_gt_score", "mean_non_gt_score"]}
+
+                df = pd.DataFrame(all_metrics)
+                print(f" (Evaluated on {len(all_metrics)} valid samples)", end="")
+                return df.mean().to_dict()
+
+            print("Evaluating Full EAP Distribution...")
+            full_faithfulness = run_faithfulness_eval(node_attributions)
+            
+            print(f"Evaluating Pruned Model (Threshold: {best_percentile:.2f}%)...")
+            pruned_faithfulness = run_faithfulness_eval(node_attributions, threshold_percentile=best_percentile)
+            
+            comparison = {
+                "Metric": ["AUPRC", "Precision@K", "Attribution Gap", "Mean GT Score", "Mean Non-GT Score"],
+                "Full EAP": [
+                    full_faithfulness['auprc'], 
+                    full_faithfulness['precision_at_k'], 
+                    full_faithfulness['attribution_gap'],
+                    full_faithfulness['mean_gt_score'],
+                    full_faithfulness['mean_non_gt_score']
+                ],
+                "Pruned Circuit": [
+                    pruned_faithfulness['auprc'], 
+                    pruned_faithfulness['precision_at_k'], 
+                    pruned_faithfulness['attribution_gap'],
+                    pruned_faithfulness['mean_gt_score'],
+                    pruned_faithfulness['mean_non_gt_score']
+                ]
+            }
+            comp_df = pd.DataFrame(comparison)
+            print("\n--- Circuit Faithfulness Comparison ---")
+            print(comp_df.to_string(index=False))
+            
+            comp_df.to_csv(os.path.join(save_dir, "faithfulness_comparison.csv"), index=False)
+            
+            def get_all_scores_and_masks(node_attrs, threshold_percentile=None):
+                all_s = []
+                all_m = []
+                
+                masks = None
+                if threshold_percentile is not None:
+                    masks, _, _ = self.create_masks_from_percentile(attributions, threshold_percentile)
+
+                for entry in node_attrs:
+                    from torch_geometric.data import Data
+                    dummy_data = Data(x=entry.get('x'), edge_index=entry.get('edge_index'), y=entry.get('y'))
+                    gt_mask = self.gt_evaluator.get_gt_mask(dummy_data)
+                    raw_node_scores = entry['node_scores']
+                    if masks is not None:
+                        pruned_node_scores = {}
+                        for k, v in raw_node_scores.items():
+                            mask_key = k
+                            if mask_key not in masks and '.head_' in mask_key:
+                                mask_key = mask_key.split('.head_')[0]
+                            if mask_key in masks and masks[mask_key].max() > 0:
+                                pruned_node_scores[k] = v
+                        scalar_scores = self.gt_evaluator.aggregate_node_scores(pruned_node_scores, num_nodes=gt_mask.shape[0]) if pruned_node_scores else torch.zeros_like(gt_mask)
+                    else:
+                        scalar_scores = self.gt_evaluator.aggregate_node_scores(raw_node_scores, num_nodes=gt_mask.shape[0])
+                    
+                    if gt_mask.sum() > 0:
+                        all_s.append(scalar_scores.detach().cpu())
+                        all_m.append(gt_mask.detach().cpu())
+                
+                if not all_s:
+                    return torch.zeros(1), torch.zeros(1)
+                    
+                return torch.cat(all_s), torch.cat(all_m)
+
+            print("Generating Attribution Gap plots...")
+            full_s, full_m = get_all_scores_and_masks(node_attributions)
+            self.gt_evaluator.plot_attribution_gap(full_s, full_m, os.path.join(save_dir, "attribution_gap_full.png"), "(Full EAP)")
+            pruned_s, pruned_m = get_all_scores_and_masks(node_attributions, threshold_percentile=best_percentile)
+            self.gt_evaluator.plot_attribution_gap(pruned_s, pruned_m, os.path.join(save_dir, "attribution_gap_pruned.png"), f"(Pruned @ {best_percentile:.2f}%)")
