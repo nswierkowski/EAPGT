@@ -26,9 +26,9 @@ model:
   pe_dim: 20           
   walk_length: 16 
 
-  target_wrapper_classes: 
-    - "ResGatedGraphConv"
-    - "MultiheadAttention"
+  # target_wrapper_classes: 
+  #   - "ResGatedGraphConv"
+  #   - "MultiheadAttention"
 eap:
   strategy: "macro_minar" 
   circuit_threshold_percentile: 0.0

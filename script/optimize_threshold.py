@@ -12,6 +12,8 @@ from src.interpretability.eap.strategies import MacroMinarEAP
 from src.interpretability.counterfactuals.factory import get_counterfactual_dataset
 from src.data.collator import GraphTransformerCollator
 from src.interpretability.eap.optimizer import ThresholdOptimizer
+from tqdm import tqdm
+import json
 
 def get_model(config):
     if config['model']['architecture'] == 'graphgps':
@@ -27,9 +29,34 @@ def get_cf_collate_fn(config):
         corrupted_list = [item['corrupted'] for item in batch_list]
         return {
             'clean': base_collator(clean_list),
-            'corrupted': base_collator(corrupted_list)
+            'corrupted': base_collator(corrupted_list),
+            'clean_list': clean_list
         }
     return collate_fn
+
+def compute_edge_attributions_for_dataloader(engine, dataloader, loss_fn, device):
+    """Specifically extracts edge-level attributions for all graphs in a dataloader."""
+    all_edge_attrs = []
+    for batch in tqdm(dataloader, desc="Edge Scoring", leave=False):
+        def to_device(obj, dev):
+            if hasattr(obj, 'to'): return obj.to(dev)
+            if isinstance(obj, dict): return {k: v.to(dev) if hasattr(v, 'to') else v for k, v in obj.items()}
+            return obj
+        
+        clean_batch = to_device(batch['clean'], device)
+        corrupted_batch = to_device(batch['corrupted'], device)
+        
+        batch_micro = engine.compute_edge_attributions(clean_batch, corrupted_batch, loss_fn)
+        
+        if isinstance(clean_batch, dict):
+            batch_size = len(batch['clean_list'])
+        else:
+            batch_size = clean_batch.num_graphs if hasattr(clean_batch, 'num_graphs') else 1
+            
+        for i in range(batch_size):
+            graph_micro = {k: v[i].detach().cpu() for k, v in batch_micro.items() if v.dim() == 4}
+            all_edge_attrs.append(graph_micro)
+    return all_edge_attrs
 
 def main():
     parser = argparse.ArgumentParser()
@@ -100,7 +127,49 @@ def main():
         dataset_name=config['dataset']['name'],
         config=config
     )
-    optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
+    
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    # --- TWO-PHASE DISCOVERY PIPELINE ---
+    if target_classes:
+        print("\n" + "="*50)
+        print("STARTING TWO-PHASE CIRCUIT DISCOVERY")
+        print("="*50)
+
+        # Phase 1: Topology Only (Graph Circuit)
+        print("Computing edge attributions for Validation set (Phase 1)...")
+        val_edge_attrs = compute_edge_attributions_for_dataloader(engine, val_dataloader, loss_fn, device)
+        best_edge_masks, best_edge_percentile = optimizer.optimize_graph_circuit(val_edge_attrs, save_dir)
+        
+        # Phase 2: Components Only (Model Circuit)
+        print("\n--- Phase 2: Model-Level Circuit Discovery (Components) ---")
+        optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
+        
+        # Phase 3: Joint Analysis
+        print("\n--- Phase 3: Joint Analysis (Graph + Model Circuit) ---")
+        with open(os.path.join(save_dir, 'optimal_masks.pt'), 'rb') as f:
+            best_component_masks = torch.load(f, map_location=device)
+            
+        print("Computing edge attributions for Test set (Phase 3)...")
+        test_edge_attrs = compute_edge_attributions_for_dataloader(engine, test_dataloader, loss_fn, device)
+        test_edge_masks, _ = optimizer.create_edge_masks_from_percentile(test_edge_attrs, best_edge_percentile)
+
+        joint_f1 = optimizer.evaluate_patched_model(
+            component_masks=best_component_masks, 
+            edge_masks=test_edge_masks, 
+            dataloader=test_dataloader
+        )
+        print(f"Joint Circuit (Graph + Model) Test F1: {joint_f1:.4f}")
+        
+        joint_results = {
+            "phase1_graph_percentile": float(best_edge_percentile),
+            "joint_f1": float(joint_f1)
+        }
+        with open(os.path.join(save_dir, 'joint_discovery_results.json'), 'w') as f:
+            json.dump(joint_results, f, indent=4)
+    else:
+        # Standard optimization if no wrappers
+        optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
 
 if __name__ == "__main__":
     main()

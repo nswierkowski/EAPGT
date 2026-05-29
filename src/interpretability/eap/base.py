@@ -122,7 +122,7 @@ class BaseEAP(ABC):
             eap_tensor = act_diff * grad_clean_detached
             
             # --- MACRO-EAP ---
-            macro_score = eap_tensor.sum().abs()
+            macro_score = eap_tensor.abs().sum()
             macro_attributions[name] = macro_score.cpu().item()
             
             # --- MICRO-EAP ---
@@ -142,6 +142,15 @@ class BaseEAP(ABC):
             'macro': macro_attributions,
             'micro': micro_attributions
         }
+
+    def compute_edge_attributions(self, clean_batch: Any, corrupted_batch: Any, loss_fn: Callable) -> Dict[str, torch.Tensor]:
+        """
+        Specifically extracts the gradients/attributions for the attention weights or the physical messages.
+        Since we already have the MAU wrappers, this captures the 'flow' between nodes.
+        Returns a dictionary mapping message module names to their edge-level attributions.
+        """
+        batch_scores = self.evaluate_pair(clean_batch, corrupted_batch, loss_fn)
+        return batch_scores['micro']
         
     def evaluate_pair_eap_ig(self, clean_batch: Any, corrupted_batch: Any, loss_fn: Callable, steps: int = 10) -> Dict[str, torch.Tensor]:
         """

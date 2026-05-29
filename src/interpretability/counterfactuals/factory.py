@@ -54,7 +54,8 @@ def get_counterfactual_dataset(config, base_dataset=None):
             skipped_count += 1
             continue
             
-        # REMOVED the `if transform: corrupted_data = transform(corrupted_data)` block here!
+        if transform: 
+            corrupted_data = transform(corrupted_data)
             
         counterfactuals.append({
             'index': i,

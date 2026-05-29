@@ -107,6 +107,43 @@ class ThresholdOptimizer:
             
         return flat_masks, reconstructed_masks, threshold_val
 
+    def create_edge_masks_from_percentile(self, edge_attributions: List[Dict[str, torch.Tensor]], percentile: float):
+        """
+        Converts edge attributions to binary masks based on a percentile.
+        edge_attributions is a list of dicts (per graph).
+        """
+        all_scores = []
+        # Sample to avoid memory explosion if needed, but let's try full first
+        for graph_attr in edge_attributions:
+            for score in graph_attr.values():
+                all_scores.append(score.flatten())
+        
+        if not all_scores:
+            return [], 0.0
+            
+        all_scores = torch.cat(all_scores)
+        
+        # --- PREVENT MEMORY OVERFLOW / QUANTILE LIMITS ---
+        # If the tensor is too large (> 5M elements), subsample for threshold estimation
+        print(f"Number of attributions: {all_scores.numel()}")
+        max_sample_size = 5_000_000
+        if all_scores.numel() > max_sample_size:
+            indices = torch.randint(0, all_scores.numel(), (max_sample_size,))
+            sample_scores = all_scores[indices]
+            threshold_val = torch.quantile(sample_scores.float(), percentile / 100.0).item()
+        else:
+            threshold_val = torch.quantile(all_scores.float(), percentile / 100.0).item()
+        
+        edge_masks = []
+        for graph_attr in edge_attributions:
+            graph_mask = {}
+            for name, score in graph_attr.items():
+                # We want to keep the Head dimension if it exists
+                graph_mask[name] = (score >= threshold_val).float()
+            edge_masks.append(graph_mask)
+            
+        return edge_masks, threshold_val
+
     def evaluate_baseline_pure(self, dataloader=None) -> float:
         """
         Strict Trainer-style evaluation. No NNsight, no complex dictionary unpacking.
@@ -165,7 +202,7 @@ class ThresholdOptimizer:
         
         return _evaluate(dataloader)[-1]
 
-    def evaluate_patched_model(self, masks: Dict[str, torch.Tensor] = None, dataloader=None) -> float:
+    def evaluate_patched_model(self, component_masks: Dict[str, torch.Tensor] = None, edge_masks: List[Dict[str, torch.Tensor]] = None, dataloader=None) -> float:
         """Runs F1 evaluation using NNsight for causal patching instead of manual hooks."""
         if dataloader is None:
             dataloader = self.val_dataloader
@@ -173,6 +210,7 @@ class ThresholdOptimizer:
         self.model.eval()
         all_preds = []
         all_targets = []
+        graph_offset = 0
         
         with torch.no_grad():
             for batch in tqdm(dataloader, desc="Evaluating F1", leave=False):
@@ -188,7 +226,7 @@ class ThresholdOptimizer:
                 if labels.dim() > 1 and labels.size(-1) == 1:
                     labels = labels.squeeze(-1)
 
-                if masks is None:
+                if component_masks is None and edge_masks is None:
                     with self.engine.tracer.trace(clean_batch):
                         logits = self.engine.tracer.output.logits if hasattr(self.engine.tracer.output, 'logits') else self.engine.tracer.output
                         preds = logits.argmax(dim=-1).save()
@@ -204,7 +242,10 @@ class ThresholdOptimizer:
                         corrupted_batch = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in corr_data.items()}
                     else:
                         corrupted_batch = corr_data
-
+                    
+                    batch_size = labels.size(0)
+                    batch_edge_masks = edge_masks[graph_offset : graph_offset + batch_size] if edge_masks is not None else None
+                    
                     corrupted_acts = {}
                     
                     # 1. Forward Trace: Extract corrupted batch activations
@@ -224,9 +265,6 @@ class ThresholdOptimizer:
                     # 2. Forward Trace: Clean batch causal patching
                     with self.engine.tracer.trace(clean_batch):
                         for name, data in self.engine.target_modules.items():
-                            if name not in masks:
-                                continue
-                                
                             proxy = data['proxy']
                             real_module = data['module']
                             out = proxy.output
@@ -235,8 +273,23 @@ class ThresholdOptimizer:
                             
                             clean_act = out[0] if is_tuple_output else out
                             corr_act = corrupted_acts[name] 
-                            mask_tensor = masks[name].to(self.device)
                             
+                            # Determine which mask to use
+                            mask_tensor = None
+                            
+                            # 1. Check for edge-level masks first (Phase 1 / Graph Circuit)
+                            if batch_edge_masks is not None:
+                                mask_list = [m[name] for m in batch_edge_masks if name in m]
+                                if mask_list:
+                                    mask_tensor = torch.stack(mask_list).to(self.device)
+                            
+                            # 2. Check for component-level masks (Phase 2 / Model Circuit)
+                            if mask_tensor is None and component_masks is not None and name in component_masks:
+                                mask_tensor = component_masks[name].to(self.device)
+                            
+                            if mask_tensor is None:
+                                continue
+                                
                             clean_shape = clean_act.shape
                             mask_shape = mask_tensor.shape
                             
@@ -250,6 +303,16 @@ class ThresholdOptimizer:
                             else:
                                 while len(mask_tensor.shape) < len(clean_shape):
                                     mask_tensor = mask_tensor.unsqueeze(0)
+                            
+                            # VNode patch protection for Graphormer (modify mask_tensor safely instead of Proxy)
+                            if self.model.__class__.__name__ == 'GraphormerModel' or getattr(self.model, 'name', '') == 'graphformer' or 'Graphormer' in real_module.__class__.__name__:
+                                mask_tensor = mask_tensor.expand(clean_shape).clone()
+                                if len(clean_shape) >= 2:
+                                    # HF Graphormer uses seq_first (seq_len, batch_size, hidden_size) in its encoder
+                                    if clean_shape[1] == batch_size:
+                                        mask_tensor[0, ...] = 1.0
+                                    elif clean_shape[0] == batch_size:
+                                        mask_tensor[:, 0, ...] = 1.0
                             
                             # Apply the patch
                             patched_act = (clean_act * mask_tensor) + (corr_act * (1.0 - mask_tensor))
@@ -270,6 +333,8 @@ class ThresholdOptimizer:
                         
                     all_preds.append(preds.cpu())
                     all_targets.append(labels.cpu())
+                
+                graph_offset += labels.size(0)
                     
         preds = torch.cat(all_preds).numpy()
         targets = torch.cat(all_targets).numpy()
@@ -327,7 +392,7 @@ class ThresholdOptimizer:
         pure_f1 = self.evaluate_baseline_pure(dataloader=self.val_dataloader)
         
         print("Calculating Baseline F1 - No Pruning (Validation)...")
-        baseline_f1 = self.evaluate_patched_model(masks=None, dataloader=self.val_dataloader)
+        baseline_f1 = self.evaluate_patched_model(component_masks=None, dataloader=self.val_dataloader)
         
         print(f"\n--- VALIDATION BASELINE COMPARISON ---")
         print(f"Pure Trainer F1: {pure_f1 * 100:.2f}%")
@@ -347,7 +412,7 @@ class ThresholdOptimizer:
             mid_percentile = (low + high) / 2.0
             
             flat_masks, recon_masks, _ = self.create_masks_from_percentile(attributions, mid_percentile)
-            current_f1 = self.evaluate_patched_model(masks=recon_masks, dataloader=self.val_dataloader)
+            current_f1 = self.evaluate_patched_model(component_masks=recon_masks, dataloader=self.val_dataloader)
             
             print(f"Testing Percentile: {mid_percentile:5.2f}% | Val F1: {current_f1:.4f}", end="")
             
@@ -367,12 +432,12 @@ class ThresholdOptimizer:
         print(f"Final Patched Val F1 Score: {best_f1:.4f} (Drop: {baseline_f1 - best_f1:.4f})")
 
         print("\n--- Final Test Set Evaluation ---")
-        test_full_f1 = self.evaluate_patched_model(masks=None, dataloader=self.test_dataloader)
+        test_full_f1 = self.evaluate_patched_model(component_masks=None, dataloader=self.test_dataloader)
         print(f"Full Model Test F1:  {test_full_f1:.4f}")
 
         test_circuit_f1 = None
         if best_recon_masks is not None:
-            test_circuit_f1 = self.evaluate_patched_model(masks=best_recon_masks, dataloader=self.test_dataloader)
+            test_circuit_f1 = self.evaluate_patched_model(component_masks=best_recon_masks, dataloader=self.test_dataloader)
             print(f"Circuit Test F1:     {test_circuit_f1:.4f}")
             print(f"Test Set Drop:       {test_full_f1 - test_circuit_f1:.4f}")
 
@@ -524,3 +589,44 @@ class ThresholdOptimizer:
             self.gt_evaluator.plot_attribution_gap(full_s, full_m, os.path.join(save_dir, "attribution_gap_full.png"), "(Full EAP)")
             pruned_s, pruned_m = get_all_scores_and_masks(node_attributions, threshold_percentile=best_percentile)
             self.gt_evaluator.plot_attribution_gap(pruned_s, pruned_m, os.path.join(save_dir, "attribution_gap_pruned.png"), f"(Pruned @ {best_percentile:.2f}%)")
+
+    def optimize_graph_circuit(self, edge_attributions: List[Dict[str, torch.Tensor]], save_dir: str) -> List[Dict[str, torch.Tensor]]:
+        """
+        Executes binary search for the optimal edge threshold (Phase 1).
+        """
+        print("\n--- Phase 1: Graph-Level Circuit Discovery (Topology) ---")
+        
+        baseline_f1 = self.evaluate_patched_model(component_masks=None, edge_masks=None, dataloader=self.val_dataloader)
+        target_f1 = baseline_f1 - self.tolerance
+        print(f"Baseline F1: {baseline_f1:.4f} | Target F1: {target_f1:.4f}")
+
+        low, high = 0.0, 100.0
+        best_percentile = 0.0
+        best_edge_masks = None
+        epsilon = 1.0 
+
+        while (high - low) > epsilon:
+            mid = (low + high) / 2.0
+            edge_masks, _ = self.create_edge_masks_from_percentile(edge_attributions, mid)
+            current_f1 = self.evaluate_patched_model(component_masks=None, edge_masks=edge_masks, dataloader=self.val_dataloader)
+            
+            print(f"Testing Edge Percentile: {mid:5.2f}% | Val F1: {current_f1:.4f}", end="")
+            if current_f1 >= target_f1:
+                print(" -> PASSED")
+                best_percentile = mid
+                best_edge_masks = edge_masks
+                low = mid
+            else:
+                print(" -> FAILED")
+                high = mid
+
+        print(f"Optimal Graph Circuit Edge Percentile: {best_percentile:.2f}%")
+        
+        if best_edge_masks:
+            mask_path = os.path.join(save_dir, 'optimal_edge_masks.pt')
+            # Extract just a representative mask or enough for the circuit visualization
+            # Saving the whole list might be too large for .pt if not careful
+            torch.save(best_edge_masks, mask_path)
+            print(f"Saved optimal edge masks to {mask_path}")
+            
+        return best_edge_masks, best_percentile
