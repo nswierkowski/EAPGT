@@ -145,7 +145,7 @@ def main():
         print("\n--- Phase 2: Model-Level Circuit Discovery (Components) ---")
         optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
         
-        # Phase 3: Joint Analysis
+        # Phase 3: Joint Analysis & Testing
         print("\n--- Phase 3: Joint Analysis (Graph + Model Circuit) ---")
         with open(os.path.join(save_dir, 'optimal_masks.pt'), 'rb') as f:
             best_component_masks = torch.load(f, map_location=device)
@@ -154,6 +154,19 @@ def main():
         test_edge_attrs = compute_edge_attributions_for_dataloader(engine, test_dataloader, loss_fn, device)
         test_edge_masks, _ = optimizer.create_edge_masks_from_percentile(test_edge_attrs, best_edge_percentile)
 
+        # -------------------------------------------------------------
+        # Evaluate pure Graph Circuit on the test dataset 
+        # (Pass None to component_masks to leave the model brain fully active)
+        # -------------------------------------------------------------
+        print("Evaluating pure Graph Circuit (Edges Only) on Test Set...")
+        graph_circuit_f1 = optimizer.evaluate_patched_model(
+            component_masks=None, 
+            edge_masks=test_edge_masks, 
+            dataloader=test_dataloader
+        )
+        print(f"Graph Circuit (Edges only) Test F1: {graph_circuit_f1:.4f}")
+
+        # Evaluate the Joint Circuit
         joint_f1 = optimizer.evaluate_patched_model(
             component_masks=best_component_masks, 
             edge_masks=test_edge_masks, 
@@ -161,8 +174,12 @@ def main():
         )
         print(f"Joint Circuit (Graph + Model) Test F1: {joint_f1:.4f}")
         
+        # -------------------------------------------------------------
+        # Update JSON to save all metrics
+        # -------------------------------------------------------------
         joint_results = {
             "phase1_graph_percentile": float(best_edge_percentile),
+            "graph_circuit_f1": float(graph_circuit_f1),
             "joint_f1": float(joint_f1)
         }
         with open(os.path.join(save_dir, 'joint_discovery_results.json'), 'w') as f:
@@ -170,6 +187,15 @@ def main():
     else:
         # Standard optimization if no wrappers
         optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
+
+    # -----------------------------------------------------------------
+    # NEW CAUSAL BENCHMARK EVALUATION: Computes K-Node Induced Subgraphs 
+    # and dumps the factual drop in F1 scores to a JSON file.
+    # -----------------------------------------------------------------
+    print("\n" + "-"*60)
+    print("RUNNING TRUE CAUSAL NODE-INDUCED SUBGRAPH BASELINES")
+    print("-"*60)
+    optimizer.run_node_selection_baselines(save_dir=save_dir, dataloader=test_dataloader)
 
 if __name__ == "__main__":
     main()

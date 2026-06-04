@@ -1,3 +1,4 @@
+from networkx import config
 import os
 import yaml
 from src.models.wrapper import instrument_model
@@ -283,43 +284,39 @@ def main():
 
     global_macro, micro_edges = compute_global_scores(engine, dataloader, loss_fn, device)
 
-
     def compute_node_attributions(micro_edges: list) -> list:
-        """Aggregates edge‑wise micro scores into per‑node scores.
-        Each entry in ``micro_edges`` contains:
-            - ``edge_index`` (2 x E tensor)
-            - ``micro_scores`` (dict of tensors per module)
-        The function returns a list of dicts with the same keys plus ``node_scores``
-        (tensor of shape [num_nodes, ...] per module)."""
+        """
+        Aggregates edge‑wise micro scores into per‑node scores.
+        Correctly aligns attributions to follow target/receiver node conventions.
+        """
         node_attributions = []
         for edge_data in micro_edges:
             edge_index = edge_data['edge_index']  # shape (2, E)
             if edge_index.numel() == 0:
-                # No edges for this graph – skip
                 continue
-            target_nodes = edge_index[0]
+                
+            # FIX 1: PyG edge_index[1] represents target/receiver nodes
+            target_nodes = edge_index[1] 
             num_edges = target_nodes.shape[0]
             num_nodes = int(target_nodes.max().item()) + 1 if num_edges > 0 else 0
             node_scores = {}
+            
             for name, scores in edge_data['micro_scores'].items():
-                score_len = scores.shape[-1] # Usually [heads, length] or [length]
+                score_len = scores.shape[-1] 
                 
-                # 1. Attention Matrix [N+1, N+1] or [N, N]
+                # FIX 2: Sum over columns (dim=1) to aggregate attention into target rows
                 if scores.dim() == 2 and name.endswith(".M"):
-                    node_scores[name] = scores.sum(dim=0)
+                    node_scores[name] = scores.sum(dim=1)
                 
-                # 2. Node-level scores (already aggregated or from node-level layers like MLPs)
-                # We check for both N and N+1 (to support Graphormer VNode)
+                # Node-level scores (already aggregated or from MLPs)
                 elif score_len == num_nodes or score_len == num_nodes + 1:
                     node_scores[name] = scores
 
-                # 3. Edge-level scores (Standard MPNN)
+                # Edge-level scores (Standard MPNN layers)
                 elif score_len == num_edges:
                     if scores.dim() == 2:
                         # Head-wise edge scores [heads, num_edges]
                         heads = scores.shape[0]
-                        agg = torch.zeros((heads, score_len), dtype=scores.dtype, device=scores.device) # Temporary fix for shape
-                        # Re-calculate agg shape based on num_nodes
                         agg = torch.zeros((heads, num_nodes), dtype=scores.dtype, device=scores.device)
                         for i in range(num_edges):
                             tgt = int(target_nodes[i].item())
@@ -334,14 +331,15 @@ def main():
                         node_scores[name] = agg
                 
                 else:
-                    # Fallback for unexpected shapes
                     node_scores[name] = scores
-            # keep original edge data and add node scores
+                    
+            # Keep original edge data and append updated node scores
             new_entry = dict(edge_data)
             new_entry['node_scores'] = node_scores
             node_attributions.append(new_entry)
+            
         return node_attributions
-
+    
     global_save_path = os.path.join(config['experiment']['save_dir'], 'global_attributions.pt')
     torch.save(global_macro, global_save_path)
     print(f"Saved global attributions to {global_save_path}")
