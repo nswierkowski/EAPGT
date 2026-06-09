@@ -44,15 +44,72 @@ def get_eap_engine(strategy_str: str, model: nn.Module, config: dict):
     }
     return strategies[strategy_str](model, config)
 
-def compute_global_scores(engine, dataloader, loss_fn, device) -> tuple:
+def compute_node_attributions(micro_edges: list) -> list:
+    """
+    Aggregates edge‑wise micro scores into per‑node scores.
+    Correctly aligns attributions to follow target/receiver node conventions.
+    """
+    node_attributions = []
+    for edge_data in micro_edges:
+        edge_index = edge_data['edge_index']  # shape (2, E)
+        if edge_index.numel() == 0:
+            continue
+            
+        target_nodes = edge_index[1] 
+        num_edges = target_nodes.shape[0]
+        num_nodes = int(target_nodes.max().item()) + 1 if num_edges > 0 else 0
+        node_scores = {}
+        
+        for name, scores in edge_data['micro_scores'].items():
+            score_len = scores.shape[-1] 
+            
+            if scores.dim() == 2 and name.endswith(".M"):
+                node_scores[name] = scores.sum(dim=1)
+            
+            elif score_len == num_nodes or score_len == num_nodes + 1:
+                node_scores[name] = scores
+
+            elif score_len == num_edges:
+                if scores.dim() == 2:
+                    heads = scores.shape[0]
+                    agg = torch.zeros((heads, num_nodes), dtype=scores.dtype, device=scores.device)
+                    for i in range(num_edges):
+                        tgt = int(target_nodes[i].item())
+                        agg[:, tgt] += scores[:, i]
+                    node_scores[name] = agg
+                else:
+                    agg = torch.zeros((num_nodes,), dtype=scores.dtype, device=scores.device)
+                    for i in range(num_edges):
+                        tgt = int(target_nodes[i].item())
+                        agg[tgt] += scores[i]
+                    node_scores[name] = agg
+            else:
+                node_scores[name] = scores
+                
+        new_entry = dict(edge_data)
+        new_entry['node_scores'] = node_scores
+        node_attributions.append(new_entry)
+        
+    return node_attributions
+
+def compute_global_scores(engine, dataloader, loss_fn, device, save_dir) -> tuple:
     """
     Aggregates EAP scores across the entire dataset.
-    Splits processing into Macro (Component) and Micro (Structural) flows.
+    Now processes and saves micro/node data in chunks to prevent Out Of Memory errors.
     """
     print("Computing global attribution scores...")
     global_macro = {}
-    all_micro_edges = []
     total_graphs = 0
+    
+    # Chunking setup to prevent RAM overflow
+    current_micro_chunk = []
+    chunk_size = 1000  # Number of graphs to hold in memory before saving
+    chunk_idx = 0
+    
+    micro_dir = os.path.join(save_dir, 'micro_chunks')
+    node_dir = os.path.join(save_dir, 'node_chunks')
+    os.makedirs(micro_dir, exist_ok=True)
+    os.makedirs(node_dir, exist_ok=True)
     
     for batch in tqdm(dataloader, desc="EAP Scoring"):
         def to_device(obj, dev):
@@ -67,13 +124,12 @@ def compute_global_scores(engine, dataloader, loss_fn, device) -> tuple:
         
         batch_scores = engine.evaluate_pair(clean_batch, corrupted_batch, loss_fn)
         
+        # 1. Macro Scores
         macro_scores = batch_scores['macro']
         for name, score in macro_scores.items():
             score_val = score.item() if isinstance(score, torch.Tensor) else score
-            
             if name not in global_macro:
                 global_macro[name] = 0.0
-
             global_macro[name] += score_val
             
         # 2. Micro Scores (UNBATCHING LOGIC)
@@ -99,18 +155,15 @@ def compute_global_scores(engine, dataloader, loss_fn, device) -> tuple:
                     for h_idx in range(graph_attn_slice.shape[0]):
                         head_key = f"{k}.head_{h_idx}"
                         graph_micro_scores[head_key] = graph_attn_slice[h_idx].detach().cpu()
-                
                 elif total_batch_edges > 0 and v.shape[0] == total_batch_edges:
                     graph_micro_scores[k] = v[edge_offset : edge_offset + num_edges].detach().cpu()
-                
                 else:
                     graph_micro_scores[k] = v.detach().cpu()
             
-            all_micro_edges.append({
+            current_micro_chunk.append({
                 'graph_index': total_graphs + i,
                 'edge_index': graph.edge_index.cpu(),
                 'micro_scores': graph_micro_scores,
-                
                 'x': graph.x.cpu() if hasattr(graph, 'x') and graph.x is not None else None,
                 'y': graph.y.cpu() if hasattr(graph, 'y') and graph.y is not None else None
             })
@@ -119,11 +172,38 @@ def compute_global_scores(engine, dataloader, loss_fn, device) -> tuple:
             
         total_graphs += batch_size
 
+        # --- MEMORY CHUNKING SAVE TRIGGER ---
+        if len(current_micro_chunk) >= chunk_size:
+            # Save Micro chunks
+            micro_path = os.path.join(micro_dir, f'micro_chunk_{chunk_idx}.pt')
+            torch.save(current_micro_chunk, micro_path)
+            
+            # Immediately compute and save Node attributions for this chunk
+            node_chunk = compute_node_attributions(current_micro_chunk)
+            node_path = os.path.join(node_dir, f'node_chunk_{chunk_idx}.pt')
+            torch.save(node_chunk, node_path)
+            
+            # CLEAR LISTS TO FREE RAM
+            current_micro_chunk.clear()
+            chunk_idx += 1
+
+    # Process any remaining graphs after the loop finishes
+    if len(current_micro_chunk) > 0:
+        micro_path = os.path.join(micro_dir, f'micro_chunk_{chunk_idx}.pt')
+        torch.save(current_micro_chunk, micro_path)
+        
+        node_chunk = compute_node_attributions(current_micro_chunk)
+        node_path = os.path.join(node_dir, f'node_chunk_{chunk_idx}.pt')
+        torch.save(node_chunk, node_path)
+        
+        current_micro_chunk.clear()
+
+    # Finalize Global Macro Aggregation
     for name in global_macro.keys():
         global_macro[name] /= total_graphs
         global_macro[name] = torch.tensor(global_macro[name])
         
-    return global_macro, all_micro_edges
+    return global_macro
 
 def get_cf_collate_fn(config):
     base_collator = GraphTransformerCollator(config)
@@ -257,7 +337,7 @@ def main():
     ]
     
     cf_collate_fn = get_cf_collate_fn(config)
-    dataloader_to_use = DataLoader # if config['model']['architecture'] == 'graphformer' else PyG_DataLoader
+    dataloader_to_use = DataLoader
     dataloader = dataloader_to_use(
         train_cf_list,  
         batch_size=config['dataset']['batch_size'], 
@@ -281,78 +361,14 @@ def main():
     loss_fn = nn.CrossEntropyLoss()
     engine = get_eap_engine(config['eap']['strategy'], model, config)
 
+    # Note: Passed the save directory directly into compute_global_scores
+    global_macro = compute_global_scores(engine, dataloader, loss_fn, device, config['experiment']['save_dir'])
 
-    global_macro, micro_edges = compute_global_scores(engine, dataloader, loss_fn, device)
-
-    def compute_node_attributions(micro_edges: list) -> list:
-        """
-        Aggregates edge‑wise micro scores into per‑node scores.
-        Correctly aligns attributions to follow target/receiver node conventions.
-        """
-        node_attributions = []
-        for edge_data in micro_edges:
-            edge_index = edge_data['edge_index']  # shape (2, E)
-            if edge_index.numel() == 0:
-                continue
-                
-            # FIX 1: PyG edge_index[1] represents target/receiver nodes
-            target_nodes = edge_index[1] 
-            num_edges = target_nodes.shape[0]
-            num_nodes = int(target_nodes.max().item()) + 1 if num_edges > 0 else 0
-            node_scores = {}
-            
-            for name, scores in edge_data['micro_scores'].items():
-                score_len = scores.shape[-1] 
-                
-                # FIX 2: Sum over columns (dim=1) to aggregate attention into target rows
-                if scores.dim() == 2 and name.endswith(".M"):
-                    node_scores[name] = scores.sum(dim=1)
-                
-                # Node-level scores (already aggregated or from MLPs)
-                elif score_len == num_nodes or score_len == num_nodes + 1:
-                    node_scores[name] = scores
-
-                # Edge-level scores (Standard MPNN layers)
-                elif score_len == num_edges:
-                    if scores.dim() == 2:
-                        # Head-wise edge scores [heads, num_edges]
-                        heads = scores.shape[0]
-                        agg = torch.zeros((heads, num_nodes), dtype=scores.dtype, device=scores.device)
-                        for i in range(num_edges):
-                            tgt = int(target_nodes[i].item())
-                            agg[:, tgt] += scores[:, i]
-                        node_scores[name] = agg
-                    else:
-                        # Scalar edge scores [num_edges]
-                        agg = torch.zeros((num_nodes,), dtype=scores.dtype, device=scores.device)
-                        for i in range(num_edges):
-                            tgt = int(target_nodes[i].item())
-                            agg[tgt] += scores[i]
-                        node_scores[name] = agg
-                
-                else:
-                    node_scores[name] = scores
-                    
-            # Keep original edge data and append updated node scores
-            new_entry = dict(edge_data)
-            new_entry['node_scores'] = node_scores
-            node_attributions.append(new_entry)
-            
-        return node_attributions
-    
+    # Save the aggregated macroscopic component scores
     global_save_path = os.path.join(config['experiment']['save_dir'], 'global_attributions.pt')
     torch.save(global_macro, global_save_path)
-    print(f"Saved global attributions to {global_save_path}")
-
-    micro_save_path = os.path.join(config['experiment']['save_dir'], 'micro_edges_raw.pt')
-    torch.save(micro_edges, micro_save_path)
-    print(f"Saved raw Micro-EAP graph edges and scores to {micro_save_path}")
-
-    # Compute node-level EAP attributions and persist them
-    node_attributions = compute_node_attributions(micro_edges)
-    node_save_path = os.path.join(config['experiment']['save_dir'], 'node_attributions.pt')
-    torch.save(node_attributions, node_save_path)
-    print(f"Saved node-level EAP attributions to {node_save_path}")
+    print(f"\nSaved global attributions to {global_save_path}")
+    print(f"Successfully saved chunked micro and node attributions within {config['experiment']['save_dir']}")
 
     analyze_attribution_scores(global_macro, config['experiment']['save_dir'], config['eap']['strategy'])
 
@@ -364,7 +380,6 @@ def main():
         save_dir=config['experiment']['save_dir'],  
         threshold_percentile=circuit_threshold
     )
-
 
 if __name__ == "__main__":
     main()

@@ -2,7 +2,7 @@ import os
 import yaml
 import torch
 import argparse
-# from torch_geometric.loader import DataLoader
+import gc
 from torch.utils.data import DataLoader
 
 from src.models.wrapper import instrument_model
@@ -34,8 +34,8 @@ def get_cf_collate_fn(config):
         }
     return collate_fn
 
-def compute_edge_attributions_for_dataloader(engine, dataloader, loss_fn, device):
-    """Specifically extracts edge-level attributions for all graphs in a dataloader."""
+def compute_edge_attributions_for_dataloader(engine, dataloader, loss_fn, device, threshold=None):
+    """Extracts edge-level attributions. If threshold is provided, binarizes immediately to save RAM."""
     all_edge_attrs = []
     for batch in tqdm(dataloader, desc="Edge Scoring", leave=False):
         def to_device(obj, dev):
@@ -54,8 +54,17 @@ def compute_edge_attributions_for_dataloader(engine, dataloader, loss_fn, device
             batch_size = clean_batch.num_graphs if hasattr(clean_batch, 'num_graphs') else 1
             
         for i in range(batch_size):
-            graph_micro = {k: v[i].detach().cpu() for k, v in batch_micro.items() if v.dim() == 4}
+            if threshold is not None:
+                # OOM Fix: Immediately cast to boolean mask, discarding the heavy floats
+                graph_micro = {k: (v[i].detach().cpu().abs() >= threshold) for k, v in batch_micro.items() if v.dim() == 4}
+            else:
+                # Keep as floats for percentile search (Validation Set)
+                graph_micro = {k: v[i].detach().cpu().clone() for k, v in batch_micro.items() if v.dim() == 4}
             all_edge_attrs.append(graph_micro)
+            
+        del batch_micro, clean_batch, corrupted_batch
+        torch.cuda.empty_cache()
+        
     return all_edge_attrs
 
 def main():
@@ -81,23 +90,17 @@ def main():
         if hasattr(cf_pair['clean'], 'split_mask') and cf_pair['clean'].split_mask.item() == 2
     ]
 
-    if not val_cf_list:
-        raise ValueError("No validation samples found (split_mask == 1). Ensure run_eap.py generated CFs for the val split.")
-    if not test_cf_list:
-        raise ValueError("No test samples found (split_mask == 2). Ensure run_eap.py generated CFs for the test split.")
+    # CLEANUP GIANT PARENT LIST
+    del cf_data_list
+    gc.collect()
 
-    val_dataloader = DataLoader(
-        val_cf_list,
-        batch_size=config['dataset']['batch_size'],
-        shuffle=False,
-        collate_fn=get_cf_collate_fn(config)
-    )
-    test_dataloader = DataLoader(
-        test_cf_list,
-        batch_size=config['dataset']['batch_size'],
-        shuffle=False,
-        collate_fn=get_cf_collate_fn(config)
-    )
+    if not val_cf_list:
+        raise ValueError("No validation samples found (split_mask == 1).")
+    if not test_cf_list:
+        raise ValueError("No test samples found (split_mask == 2).")
+
+    val_dataloader = DataLoader(val_cf_list, batch_size=config['dataset']['batch_size'], shuffle=False, collate_fn=get_cf_collate_fn(config))
+    test_dataloader = DataLoader(test_cf_list, batch_size=config['dataset']['batch_size'], shuffle=False, collate_fn=get_cf_collate_fn(config))
 
     model = get_model(config).to(device)
     checkpoint = torch.load(config['model']['checkpoint_path'], map_location=device)
@@ -118,8 +121,6 @@ def main():
     if os.path.exists(node_attr_path):
         print(f"Loading node attributions from {node_attr_path}...")
         node_attributions = torch.load(node_attr_path, map_location=device)
-    else:
-        print(f"Warning: node_attributions.pt not found at {node_attr_path}. Faithfulness evaluation will be skipped.")
 
     optimizer = ThresholdOptimizer(
         engine, model, val_dataloader, test_dataloader, device, 
@@ -130,7 +131,6 @@ def main():
     
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    # --- TWO-PHASE DISCOVERY PIPELINE ---
     if target_classes:
         print("\n" + "="*50)
         print("STARTING TWO-PHASE CIRCUIT DISCOVERY")
@@ -139,7 +139,14 @@ def main():
         # Phase 1: Topology Only (Graph Circuit)
         print("Computing edge attributions for Validation set (Phase 1)...")
         val_edge_attrs = compute_edge_attributions_for_dataloader(engine, val_dataloader, loss_fn, device)
-        best_edge_masks, best_edge_percentile = optimizer.optimize_graph_circuit(val_edge_attrs, save_dir)
+        
+        # We KEEP the threshold this time!
+        best_edge_threshold, best_edge_percentile = optimizer.optimize_graph_circuit(val_edge_attrs, save_dir)
+        
+        # AGGRESSIVE CLEANUP: Remove Validation metrics immediately
+        del val_edge_attrs
+        gc.collect()
+        torch.cuda.empty_cache()
         
         # Phase 2: Components Only (Model Circuit)
         print("\n--- Phase 2: Model-Level Circuit Discovery (Components) ---")
@@ -150,14 +157,12 @@ def main():
         with open(os.path.join(save_dir, 'optimal_masks.pt'), 'rb') as f:
             best_component_masks = torch.load(f, map_location=device)
             
-        print("Computing edge attributions for Test set (Phase 3)...")
-        test_edge_attrs = compute_edge_attributions_for_dataloader(engine, test_dataloader, loss_fn, device)
-        test_edge_masks, _ = optimizer.create_edge_masks_from_percentile(test_edge_attrs, best_edge_percentile)
+        print("Computing edge masks for Test set (Phase 3)...")
+        # MAGIC HAPPENS HERE: Pass the threshold to get boolean masks back instantly
+        test_edge_masks = compute_edge_attributions_for_dataloader(
+            engine, test_dataloader, loss_fn, device, threshold=best_edge_threshold
+        )
 
-        # -------------------------------------------------------------
-        # Evaluate pure Graph Circuit on the test dataset 
-        # (Pass None to component_masks to leave the model brain fully active)
-        # -------------------------------------------------------------
         print("Evaluating pure Graph Circuit (Edges Only) on Test Set...")
         graph_circuit_f1 = optimizer.evaluate_patched_model(
             component_masks=None, 
@@ -166,7 +171,7 @@ def main():
         )
         print(f"Graph Circuit (Edges only) Test F1: {graph_circuit_f1:.4f}")
 
-        # Evaluate the Joint Circuit
+        print("Evaluating Joint Circuit (Graph + Model) on Test Set...")
         joint_f1 = optimizer.evaluate_patched_model(
             component_masks=best_component_masks, 
             edge_masks=test_edge_masks, 
@@ -174,9 +179,6 @@ def main():
         )
         print(f"Joint Circuit (Graph + Model) Test F1: {joint_f1:.4f}")
         
-        # -------------------------------------------------------------
-        # Update JSON to save all metrics
-        # -------------------------------------------------------------
         joint_results = {
             "phase1_graph_percentile": float(best_edge_percentile),
             "graph_circuit_f1": float(graph_circuit_f1),
@@ -184,14 +186,14 @@ def main():
         }
         with open(os.path.join(save_dir, 'joint_discovery_results.json'), 'w') as f:
             json.dump(joint_results, f, indent=4)
+            
+        # Clean out testing structures before running node baselines
+        del test_edge_masks
+        gc.collect()
+        torch.cuda.empty_cache()
     else:
-        # Standard optimization if no wrappers
         optimizer.optimize(attributions, save_dir, node_attributions=node_attributions)
 
-    # -----------------------------------------------------------------
-    # NEW CAUSAL BENCHMARK EVALUATION: Computes K-Node Induced Subgraphs 
-    # and dumps the factual drop in F1 scores to a JSON file.
-    # -----------------------------------------------------------------
     print("\n" + "-"*60)
     print("RUNNING TRUE CAUSAL NODE-INDUCED SUBGRAPH BASELINES")
     print("-"*60)

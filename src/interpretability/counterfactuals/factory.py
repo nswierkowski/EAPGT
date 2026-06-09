@@ -1,4 +1,5 @@
 import os
+import glob
 import torch
 from tqdm import tqdm
 
@@ -18,19 +19,32 @@ def get_counterfactual_engine(config):
 
 def get_counterfactual_dataset(config, base_dataset=None):
     """
-    Checks if the counterfactual dataset exists on disk.
+    Checks if the counterfactual dataset exists on disk (legacy single file or chunked).
     If it does, loads and returns it.
-    If not, generates it using the appropriate engine and base dataset.
+    If not, generates it using the appropriate engine and base dataset, saving in chunks to avoid OOM.
     """
     root_dir = config['dataset']['root_dir']
-    cf_path = os.path.join(root_dir, 'counterfactuals.pt')
+    legacy_cf_path = os.path.join(root_dir, 'counterfactuals.pt')
+    cf_dir = os.path.join(root_dir, 'counterfactuals')
     
-    if os.path.exists(cf_path):
-        print(f"[Counterfactuals] Found existing file at {cf_path}. Loading from disk...")
-        return torch.load(cf_path, weights_only=False)
+    # 1. Check for legacy monolithic file
+    if os.path.exists(legacy_cf_path):
+        print(f"[Counterfactuals] Found legacy file at {legacy_cf_path}. Loading...")
+        return torch.load(legacy_cf_path, weights_only=False)
         
-    print(f"[Counterfactuals] File not found at {cf_path}. Starting generation...")
+    # 2. Check for existing chunks
+    os.makedirs(cf_dir, exist_ok=True)
+    existing_chunks = sorted(glob.glob(os.path.join(cf_dir, 'cf_chunk_*.pt')))
     
+    if existing_chunks:
+        print(f"[Counterfactuals] Found {len(existing_chunks)} existing chunks in {cf_dir}. Loading into memory...")
+        all_cfs = []
+        for chunk_file in tqdm(existing_chunks, desc="Loading Chunks"):
+            all_cfs.extend(torch.load(chunk_file, weights_only=False))
+        return all_cfs
+
+    # 3. Generate from scratch if neither exists
+    print(f"[Counterfactuals] No existing data found. Starting generation...")
     if base_dataset is None:
         raise ValueError("A 'base_dataset' must be provided to generate counterfactuals from scratch.")
         
@@ -38,18 +52,18 @@ def get_counterfactual_dataset(config, base_dataset=None):
     transform = get_transform(config)
     
     counterfactuals = []
-    
     skipped_count = 0
     success_count = 0
+    chunk_size = 5000  # Safe threshold to avoid OOM. Adjust if your graphs are exceptionally large.
+    chunk_idx = 0
     
     print(f"LEN OF base_dataset: {len(base_dataset)}")
     for i in tqdm(range(len(base_dataset)), desc="Generating Pairs"):
         clean_data = base_dataset[i]
         
-        # Generate counterfactual (it deepcopies the already-transformed clean_data)
+        # Generate counterfactual 
         corrupted_data = engine.generate(clean_data)
         
-        # Detect if the example was skipped or failed
         if corrupted_data is clean_data or corrupted_data is None:
             skipped_count += 1
             continue
@@ -64,6 +78,18 @@ def get_counterfactual_dataset(config, base_dataset=None):
         })
         success_count += 1
 
+        # Dump to disk and clear list when chunk is full to prevent OOM
+        if len(counterfactuals) >= chunk_size:
+            chunk_path = os.path.join(cf_dir, f'cf_chunk_{chunk_idx}.pt')
+            torch.save(counterfactuals, chunk_path)
+            counterfactuals = []  # Free memory
+            chunk_idx += 1
+
+    # Save any remaining items
+    if counterfactuals:
+        chunk_path = os.path.join(cf_dir, f'cf_chunk_{chunk_idx}.pt')
+        torch.save(counterfactuals, chunk_path)
+
     print(f"\n[{'='*40}]")
     print(f"[Counterfactuals] Generation Summary:")
     print(f"  Total Processed:  {len(base_dataset)}")
@@ -73,8 +99,9 @@ def get_counterfactual_dataset(config, base_dataset=None):
 
     if success_count == 0:
         print("WARNING: No counterfactuals were generated! Check your generation logic.")
+        return []
         
-    torch.save(counterfactuals, cf_path)
-    print(f"Saved {len(counterfactuals)} counterfactual pairs to {cf_path}")
+    print(f"Saved {success_count} total counterfactual pairs across chunks in {cf_dir}")
     
-    return counterfactuals
+    # Recursively call to trigger the loading logic (Step 2) and return the full list
+    return get_counterfactual_dataset(config, base_dataset=None)

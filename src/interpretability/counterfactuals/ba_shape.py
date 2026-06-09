@@ -1,12 +1,12 @@
 import torch
-import copy
 import random
 from torch_geometric.data import Data
 from .base import CounterfactualEngine
 
 class BAShapesCounterfactual(CounterfactualEngine):
     def generate(self, data: Data) -> Data:
-        corrupted = copy.deepcopy(data)
+        # Use PyG's highly optimized C++ level clone instead of Python's deepcopy
+        corrupted = data.clone()
         
         if data.y.item() == 1:
             num_nodes = data.num_nodes
@@ -39,7 +39,9 @@ class BAShapesCounterfactual(CounterfactualEngine):
                     
             new_edge_tensor = torch.tensor(new_edges, dtype=torch.long).t().to(data.edge_index.device)
             
-            corrupted.edge_index[:, mask] = new_edge_tensor
+            # Safely concatenate edges rather than modifying subsets in-place
+            kept_edges = data.edge_index[:, ~mask]
+            corrupted.edge_index = torch.cat([kept_edges, new_edge_tensor], dim=1)
             
             corrupted.y = torch.tensor([0], dtype=torch.long)
             
